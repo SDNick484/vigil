@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Sessions{% endblock %}
+{% block content %}
+<h1>Sessions</h1>
+<form class="search" method="get" action="/" role="search"
+      hx-get="/" hx-trigger="input delay:250ms, search" hx-target="#results">
+  <input type="search" name="q" value="{{ q }}" autofocus
+         placeholder="Search name, label, note, first prompt, folder" aria-label="Search sessions">
+  {% if project %}<input type="hidden" name="project" value="{{ project }}">{% endif %}
+  <label><input type="checkbox" name="all" value="true" {% if all %}checked{% endif %}>
+    Include archived and earlier sessions of a chain</label>
+  <button type="submit">Search</button>
+</form>
+<div id="results">
+{% block results %}
+  <p class="muted">
+    {{ count }} session{{ "" if count == 1 else "s" }}
+    {%- if project %}, in one project (<a href="/">show all</a>){% endif %}
+  </p>
+  {% for group in groups %}
+  <section class="project">
+    <h2><a href="/?project={{ group.key|urlencode }}">{{ group.label }}</a>
+      <small class="muted">{{ group.key }}</small></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Session</th>
+          <th>Branch</th>
+          <th>Last activity</th>
+          <th>Status</th>
+          {# Machine column (v2 peers): add <th>Machine</th> here and a <td> in _session_row.html. #}
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in group.sessions %}
+        {% include "_session_row.html" %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% else %}
+  <p>No sessions match.</p>
+  {% endfor %}
+{% endblock %}
+</div>
+{% endblock %}
