@@ -159,3 +159,28 @@ def vigil_env(
     for name in ("DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME", "TERMINAL"):
         monkeypatch.delenv(name, raising=False)
     return VigilEnv(claude_home, data_home / "vigil" / "index.db", fake_bin)
+
+
+# The web service (Task 7).
+from fastapi.testclient import TestClient  # noqa: E402
+
+from vigil.config import load_config  # noqa: E402
+from vigil.web.app import create_app  # noqa: E402
+
+LOOPBACK_URL = "http://127.0.0.1:7787"
+"""Where tests reach the service. As an `Origin` header it makes a POST same-origin."""
+
+
+@pytest.fixture
+def web_client(vigil_env: VigilEnv) -> Iterator[TestClient]:
+    """The web service over the fixture transcripts (scanned before the app starts; no watcher),
+    in the `vigil_env` world. Requests go to `LOOPBACK_URL` with `Origin: LOOPBACK_URL`, as from a
+    vigil page in the browser; `del client.headers["origin"]` to send none."""
+    conn = connect(vigil_env.index)
+    scan(conn, vigil_env.claude_home)
+    conn.close()
+    app = create_app(
+        load_config(), conn_factory=lambda: connect(vigil_env.index), start_watcher=False
+    )
+    with TestClient(app, base_url=LOOPBACK_URL, headers={"Origin": LOOPBACK_URL}) as client:
+        yield client
