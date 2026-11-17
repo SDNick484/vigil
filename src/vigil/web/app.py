@@ -16,7 +16,8 @@ from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
 from vigil.paths import data_dir, index_path
 from vigil.peers import CACHE_DIR, PeerHub
-from vigil.web import WebState, api, auth, pages, watcher
+from vigil.review.store import fail_running
+from vigil.web import WebState, api, auth, pages, review, watcher
 from vigil.web.security import LoopbackGuard
 
 # Append point: include a router by appending one line.
@@ -25,6 +26,7 @@ ROUTERS: list[APIRouter] = [
     api.actions,
     pages.router,
     auth.router,
+    review.router,
 ]
 
 
@@ -44,7 +46,8 @@ def create_app(
     access is on: the token is read and the cookie signing key loaded (or created) in the data
     dir now, and AuthError is raised when either cannot be used (`vigil.web.auth.load_auth`).
     `config.peers` are asked for their sessions when a page lists them (`vigil.peers`);
-    `peer_transport` replaces the network for those requests (tests).
+    `peer_transport` replaces the network for those requests (tests). On startup, reviews left
+    `running` by an earlier run of the service are marked failed (`vigil.review.store`).
     """
     remote = auth.load_auth(config.server, data_dir())
     factory = conn_factory or functools.partial(connect, index_path())
@@ -56,6 +59,12 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # A review still marked running was cut off when the service last stopped.
+        conn = factory()
+        try:
+            fail_running(conn)
+        finally:
+            conn.close()
         task: asyncio.Task[None] | None = None
         if start_watcher:
             task = asyncio.create_task(

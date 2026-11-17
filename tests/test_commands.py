@@ -240,3 +240,66 @@ def test_resume_without_claude_is_refused(
     code, _, err = run(capsys, "resume", NAMED)
     assert code == 2
     assert "`claude` is not on PATH" in err
+
+
+def test_review_cli_json(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_review_runner import ANSWER, claude_result
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    code, out, _ = run(capsys, "review", NAMED, "--json")
+    assert code == 0
+    data = json.loads(out)
+    assert (data["session_id"], data["status"], data["cost_usd"]) == (NAMED, "done", 0.12)
+    assert [s["kind"] for s in data["suggestions"]] == ["flag", "file", "habit"]
+    runs = [c for c in vigil_env.bin.calls("claude") if "-p" in c.argv]
+    assert [c.cwd for c in runs] == [str(folder)]
+
+
+def test_review_cli_prints_suggestions(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_review_runner import ANSWER, claude_result
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    code, out, _ = run(capsys, "review", NAMED)
+    assert code == 0
+    assert "Plan first" in out
+    assert "The first turns rewrote the same file three times." in out
+    assert f"claude --resume {NAMED} --permission-mode plan" in out
+    assert "Trim tool output" in out
+    assert "Check them before acting." in out
+
+
+def test_review_cli_refused_when_folder_gone(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.test_review_runner import ANSWER, claude_result
+
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    code, out, err = run(capsys, "review", NAMED)
+    assert (code, out) == (2, "")
+    assert err == "vigil: folder no longer exists: /home/user/src/fixture-repo\n"
+
+
+def test_review_cli_failed_exit_1(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout='{"is_error": true, "result": "nope"}', exit_code=1)
+    code, out, err = run(capsys, "review", NAMED)
+    assert code == 1
+    assert "failed" in out
+    assert "nope" in err

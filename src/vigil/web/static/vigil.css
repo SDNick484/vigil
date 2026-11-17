@@ -197,3 +197,11 @@ li.session .name a { display: inline-flex; align-items: center; min-height: 2.5r
 form.search button { min-height: 2.5rem; }
 form.search label { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 2.5rem; }
 .tabular-nums { font-variant-numeric: tabular-nums; }
+article.review { border-top: 1px solid var(--line); padding: 0.5rem 0; }
+article.review h4 { font-size: 0.95rem; margin: 0.5rem 0 0.25rem; }
+.status-review-done { color: var(--ok); border-color: var(--ok); }
+.status-review-failed { color: var(--bad); border-color: var(--bad); }
+.suggestion { border: 1px solid var(--line); border-radius: 4px; padding: 0.25rem 0.75rem 0.5rem; margin: 0.5rem 0; }
+.suggestion p { margin: 0.25rem 0; overflow-wrap: anywhere; }
+.table-scroll { overflow-x: auto; max-height: 24rem; overflow-y: auto; }
+table.turns td, table.turns th { padding: 0.2rem 0.5rem; }

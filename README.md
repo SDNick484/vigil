@@ -188,6 +188,8 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `usage.shell_history` | `false` | Read your shell history to see how you launch `claude`. Off unless you turn it on. |
 | `usage.history_files` | `[]` | History files to read. Empty means the default bash, zsh and fish locations. A leading `~` is expanded. |
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |
+| `review.max_budget_usd` | `3.0` | Most a [session review](#session-reviews) may spend, in USD, 0.05 to 50 (`claude --max-budget-usd`). Claude Code checks it after each turn, so a review can go a little over. A review typically costs about $0.20 to $1 with Sonnet; Claude Code's own system prompt is most of that. |
+| `review.model` | `"sonnet"` | Model for session reviews (`claude --model`); `""` uses Claude Code's default. Same rule as `--model` in `resume.default_flags`. |
 | `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs `server.token_file`; see [Remote access](#remote-access). |
 | `server.token_file` | unset | File holding the access token, which turns remote access on. Must be an absolute path (a leading `~` is expanded) to a file you own with mode 0600 (0400 is fine too). |
 | `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs `server.token_file`. |
@@ -232,6 +234,7 @@ reference is at `/docs` while the service runs.
 | `GET /api/v1/sessions/{id}` | One session plus `chain` (every session of its resume chain, oldest first) and `resume_command`. `{id}` may also be a unique id prefix or the session's exact title. 404 if nothing matches. |
 | `GET /api/v1/projects` | Projects: `project_key`, `label`, `session_count`, `last_activity_at`. |
 | `GET /api/v1/health` | `status` (`"ok"`), `version` (vigil's), `claude_version` (null when `claude` is not found), `indexed_sessions`, `last_scan_at` (null until the service has scanned). |
+| `GET /api/v1/sessions/{id}/reviews` | The session's [reviews](#session-reviews), newest first: `id`, `status` (`running`, `done` or `failed`), `created_at`, `finished_at`, `cost_usd` (as Claude Code reported it), `model`, `claude_version`, `numbers` (the token numbers the review was given), `suggestions`, `advice` (token advice) and `error` (why it failed, or a note such as going over the budget). |
 | `GET /api/v1/peers` | The configured [peers](#peers): `name`, `url`, `fetched_at`, `stale` (it could not be reached), `error` (why), `session_count`. Their sessions are not in `/api/v1/sessions`, which lists this machine's only. |
 
 `GET /api/v1/sessions` takes these query parameters, all optional:
@@ -264,7 +267,7 @@ Each session has the same fields as `vigil ls --json` (and `vigil show --json` f
 | `remote_url`, `remote_url_at` | The session's Claude Remote Control link (null if none) and when it was written. |
 | `status` | `running` (open in a terminal), `background`, `idle`, or `unknown` when the installed `claude` cannot list live sessions. Refreshed at most every 5 seconds. |
 
-Two actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own
+These actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own
 pages:
 
 - `POST /sessions/{id}/resume` resumes the session in its folder and opens a terminal on it when
@@ -274,6 +277,10 @@ pages:
 - `POST /sessions/{id}/meta` sets vigil's own `label`, `note`, `pinned` and `archived` from form
   fields and returns the updated session. Only the fields sent change; an empty `label` or `note`
   clears it.
+- `POST /sessions/{id}/review` starts a [review](#session-reviews) of the session and answers
+  202 with `{"ok": true, "review_id": <id>}` at once; the review runs in the background. 409 with
+  `{"ok": false, "reason": "a review is already running", "review_id": <id>}` while another runs,
+  or with the reason when the session's folder is gone or `claude` is missing.
 - `POST /peers/{name}/sessions/{id}/resume` resumes a session of a [peer](#peers) on that peer, and
   answers like the resume above plus `"machine": "<name>"`. The peer's own 404 and 409 come back
   with its reason; 502 when the peer cannot be reached or refuses the request.
@@ -288,6 +295,28 @@ header themselves:
 
 While it runs, the service watches `~/.claude/projects` and indexes changed transcripts within a
 second or two, with a full rescan every 10 minutes as a safety net.
+
+## Session reviews
+
+**Review this session** on a session's page (or `vigil review <id>`, which waits and prints the
+result; `--json` prints it as the API serves it) asks Claude what would make sessions like this
+one go better or cost less. vigil runs, in the session's folder:
+
+    claude -p --resume <id> --fork-session --no-session-persistence --tools "" \
+      --output-format json --json-schema <schema> --max-budget-usd <review.max_budget_usd> \
+      [--model <review.model>] "<review prompt>"
+
+Claude reads a fork of the whole session that is not saved and has no tools, so the session itself
+is untouched and nothing new appears under `~/.claude`. The prompt carries the token numbers vigil
+computed from the transcript, the flags vigil launched the session with (only launches vigil made,
+so they may be incomplete), your `resume.default_flags` and the flags and subcommands of the
+installed `claude`. Claude answers with at most ten suggestions, each a flag, a change to
+CLAUDE.md or settings, or a habit, tied to evidence in the session, plus a few points of token
+advice. Every text field is cut to 500 characters and items that do not fit the schema are
+dropped. One review runs at a time; reviews are kept until their session leaves the index.
+
+Suggestions come from Claude reading a transcript that can hold fetched web pages and other text
+you did not write, so check them before acting on them.
 
 ## Remote access
 

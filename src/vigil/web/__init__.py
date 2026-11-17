@@ -26,6 +26,7 @@ from vigil.claude_cli import (
 )
 from vigil.config import Config
 from vigil.peers import PeerHub
+from vigil.review.runner import ReviewSlot
 
 LIVE_TTL = 5.0
 """How long (seconds) live-session status is reused before `claude agents --json` runs again."""
@@ -81,6 +82,8 @@ class WebState:
     """Set once the watcher is watching: a transcript change after this is picked up."""
     peers: PeerHub = field(default_factory=lambda: PeerHub(()))
     """The configured peers (v2) and their latest sessions."""
+    review_slot: ReviewSlot = field(default_factory=ReviewSlot)
+    """Taken while a session review runs: one at a time (`vigil.web.review`)."""
 
 
 def state(request: Request) -> WebState:

@@ -162,6 +162,15 @@ def _result_size(content: Any) -> int:
     )
 
 
+def wall_clock(n: SessionNumbers) -> str | None:
+    """The time from the first record to the last, as "N min" or "H h M min"; None when either
+    end is unknown."""
+    if n.started_at is None or n.ended_at is None:
+        return None
+    minutes = int((n.ended_at - n.started_at).total_seconds() // 60)
+    return f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
+
+
 def numbers_to_dict(n: SessionNumbers) -> dict[str, object]:
     """`n` as plain JSON types, for storing with a review."""
     return {

@@ -48,6 +48,17 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class ReviewConfig:
+    """How `vigil review` and the session page's Review run `claude -p` (`vigil.review.runner`)."""
+
+    max_budget_usd: float = 3.0
+    """`--max-budget-usd` for a review, 0.05 to 50. Claude Code checks it after each turn, so one
+    turn can go over it."""
+    model: str | None = "sonnet"
+    """`--model` for a review; None (`model = ""` in the file) means Claude Code's default."""
+
+
+@dataclass(frozen=True)
 class Peer:
     """Another machine's vigil, whose sessions this one lists (v2, `vigil.peers`)."""
 
@@ -67,6 +78,7 @@ class Config:
     resume: ResumeConfig = field(default_factory=ResumeConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
     machine: str | None = None
     """What the machine column calls this machine; None means its host name."""
     peers: tuple[Peer, ...] = ()
@@ -215,6 +227,30 @@ def _parse_server(raw: dict[str, Any]) -> ServerConfig:
     return ServerConfig(bind=bind, token_file=token_file, allowed_hosts=allowed_hosts)
 
 
+def _parse_review(raw: dict[str, Any]) -> ReviewConfig:
+    table = _table(raw, "review")
+    _check_keys(table, {"max_budget_usd", "model"}, "review")
+    defaults = ReviewConfig()
+    budget = defaults.max_budget_usd
+    if "max_budget_usd" in table:
+        value = table["max_budget_usd"]
+        if isinstance(value, bool) or not isinstance(value, int | float) or not 0.05 <= value <= 50:
+            raise ConfigError("`review.max_budget_usd` must be a number from 0.05 to 50")
+        budget = float(value)
+    model = defaults.model
+    if "model" in table:
+        value = table["model"]
+        if not isinstance(value, str):
+            raise ConfigError("`review.model` must be a string")
+        model = value.strip() or None
+        if model is not None:
+            try:
+                check(["--model", model])
+            except FlagRefused as error:
+                raise ConfigError(f"review.model: {error.reason}") from error
+    return ReviewConfig(max_budget_usd=budget, model=model)
+
+
 _PEER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")
 
 
@@ -295,8 +331,9 @@ def load_config(path: Path | None = None) -> Config:
     """Load the config file; a missing file gives the defaults.
 
     Raises ConfigError on unreadable or malformed TOML, unknown keys, wrong types, a default
-    flag outside the allow-list, a `server` value that is not an address, path or host name, or
-    a `peers` entry without a valid name, URL and token file path.
+    flag or review model outside the allow-list, a review budget out of range, a `server` value
+    that is not an address, path or host name, or a `peers` entry without a valid name, URL and
+    token file path.
     """
     path = path if path is not None else config_path()
     try:
@@ -307,7 +344,11 @@ def load_config(path: Path | None = None) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"cannot read config {path}: {error}") from error
 
-    _check_keys(raw, {"claude_home", "port", "resume", "usage", "server", "machine", "peers"}, "")
+    _check_keys(
+        raw,
+        {"claude_home", "port", "resume", "usage", "server", "review", "machine", "peers"},
+        "",
+    )
     defaults = Config()
     claude_home = defaults.claude_home
     if "claude_home" in raw:
@@ -326,6 +367,7 @@ def load_config(path: Path | None = None) -> Config:
         resume=_parse_resume(raw),
         usage=_parse_usage(raw),
         server=_parse_server(raw),
+        review=_parse_review(raw),
         machine=machine,
         peers=_parse_peers(raw, machine),
     )

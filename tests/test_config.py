@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from vigil.config import Config, ConfigError, load_config
+from vigil.config import Config, ConfigError, ReviewConfig, load_config
 from vigil.paths import config_path, data_dir, index_path
 
 
@@ -155,3 +155,21 @@ def test_remote_link_timeout_bounds(tmp_path: Path) -> None:
     for value in ("0", "0.5", "301", "-1", "'30'", "true"):
         with pytest.raises(ConfigError, match="resume.remote_link_timeout"):
             load_config(write(tmp_path, f"[resume]\nremote_link_timeout = {value}\n"))
+
+
+def test_review_config(tmp_path: Path) -> None:
+    assert load_config(write(tmp_path, "")).review == ReviewConfig(
+        max_budget_usd=3.0, model="sonnet"
+    )
+    config = load_config(write(tmp_path, '[review]\nmax_budget_usd = 1\nmodel = "opus"\n'))
+    assert config.review == ReviewConfig(max_budget_usd=1.0, model="opus")
+    assert load_config(write(tmp_path, '[review]\nmodel = ""\n')).review.model is None
+    for value in ("0.01", "51", "'1'", "true"):
+        with pytest.raises(ConfigError, match="review.max_budget_usd"):
+            load_config(write(tmp_path, f"[review]\nmax_budget_usd = {value}\n"))
+    with pytest.raises(ConfigError, match="review.model: --model: 'a b' is not a valid model name"):
+        load_config(write(tmp_path, '[review]\nmodel = "a b"\n'))
+    with pytest.raises(ConfigError, match="review.model"):
+        load_config(write(tmp_path, "[review]\nmodel = 5\n"))
+    with pytest.raises(ConfigError, match="unknown config key: review.tools"):
+        load_config(write(tmp_path, "[review]\ntools = 1\n"))

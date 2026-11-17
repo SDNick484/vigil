@@ -36,7 +36,8 @@ from vigil.peers import (
     with_machine,
 )
 from vigil.resume import TERMINAL_ALLOWED
-from vigil.review.numbers import SessionNumbers, compute_numbers
+from vigil.review.numbers import SessionNumbers, compute_numbers, wall_clock
+from vigil.review.store import list_reviews
 from vigil.serialize import apply_status, display_name
 from vigil.usage import build_report, refresh_sources
 from vigil.web import connection, state
@@ -117,6 +118,7 @@ templates.env.globals["session_url"] = session_url
 templates.env.globals["resume_url"] = resume_url
 templates.env.globals["restart_url"] = restart_url
 templates.env.globals["row_key"] = row_key
+templates.env.globals["wall_clock"] = wall_clock
 
 
 def _stale(row: SessionRow) -> bool:
@@ -278,12 +280,14 @@ def _token_numbers(row: SessionRow, flags: list[str]) -> SessionNumbers | None:
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
 def session_page(request: Request, session_id: str) -> Any:
     """Everything indexed about one session, its last exchange, where its tokens went (read from
-    the transcript now), the command that resumes it by hand, its resume chain, and forms to edit
-    its label, note, pin and archive state."""
+    the transcript now), its reviews (newest first) with Review this session, the command that
+    resumes it by hand, its resume chain, and forms to edit its label, note, pin and archive
+    state."""
     with connection(request) as conn:
         row = get_session(conn, session_id)
         links = chain(conn, row.chain_id) if row is not None else []
         flags = vigil_launch_flags(conn, row.session_id) if row is not None else []
+        reviews = list_reviews(conn, row.session_id) if row is not None else []
     if row is None:
         return _render(request, "session_detail.html", {"row": None, "ident": session_id}, 404)
     web = state(request)
@@ -298,6 +302,8 @@ def session_page(request: Request, session_id: str) -> Any:
         "busy": busy_keys([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
         "numbers": _token_numbers(row, flags),
+        "reviews": reviews,
+        "review_budget": web.config.review.max_budget_usd,
     }
     return _render(request, "session_detail.html", context)
 

@@ -60,6 +60,21 @@
 </section>
 {% endif %}
 
+{% if not peer_of(row) %}
+<section id="reviews-section">
+  <h2>Reviews</h2>
+  <p class="muted">Claude reads a copy of this session that is not saved and has no tools, and suggests flags, project file changes and habits. A review spends up to about ${{ "%.2f"|format(review_budget) }}.</p>
+  <form method="post" action="/sessions/{{ row.session_id }}/review"
+        hx-post="/sessions/{{ row.session_id }}/review" hx-target="#review-result">
+    <button type="submit">Review this session</button>
+    <span class="result" id="review-result" aria-live="polite"></span>
+  </form>
+  <div id="reviews">
+    {% for review in reviews %}{% include "_review.html" %}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section>
   <h2>Details</h2>
   <dl>

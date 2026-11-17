@@ -22,7 +22,7 @@
     {% block content %}{% endblock %}
   </main>
   <script>
-    // Resume and metadata edits answer with JSON: show the answer in the element the form names
+    // Resume, reviews and metadata edits answer with JSON: show the answer in the element the form names
     // as its hx-target, instead of swapping the JSON in.
     document.body.addEventListener("htmx:beforeSwap", function (event) {
       var xhr = event.detail.xhr;
@@ -58,6 +58,15 @@
         target.className = "result ok";
         var where = data.machine ? " on " + data.machine : "";
         target.append(data.opened_terminal ? "Opened in a terminal" + where + ": " : "Attach" + where + " with: ", code);
+      } else if (typeof data.review_id === "number") {
+        // A review started, or one is already running: show it in the list (it polls itself).
+        target.className = data.ok === true ? "result ok" : "result refused";
+        target.append(data.ok === true ? "Review started" : (data.reason || "A review is already running"));
+        var list = document.getElementById("reviews");
+        if (list && !document.getElementById("review-" + data.review_id)) {
+          var fragment = new URL(xhr.responseURL).pathname.replace(/\/review$/, "/reviews/" + data.review_id);
+          htmx.ajax("GET", fragment, {target: "#reviews", swap: "afterbegin"});
+        }
       } else if (data.id) {
         target.className = "result ok";
         target.append("Saved");
