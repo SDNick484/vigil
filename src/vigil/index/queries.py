@@ -47,6 +47,9 @@ class SessionRow:
     status: Status = "unknown"
     remote_url: str | None = None
     remote_url_at: datetime | None = None
+    open_url: str | None = None
+    """The link to join the session by right now (`vigil.serialize.open_link`), set along with
+    `status` by `apply_status`; None when it is not live or has no current link."""
 
 
 @dataclass(frozen=True)

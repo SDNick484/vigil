@@ -27,6 +27,8 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
     - `started_at` and `last_activity_at` are ISO 8601 strings in UTC (or null).
     - `remote_url` is the session's Claude Remote Control link (or null) and `remote_url_at` when
       it was written, an ISO 8601 string in UTC.
+    - `open_url` is the link to join the session by right now (`open_link`: it is live and the
+      link is from its current run), else null; null too where the live sessions are not known.
     - `models` is a sorted list; `status` is `running`, `background`, `idle` or `unknown`.
     """
     return {
@@ -57,6 +59,7 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
         "status": row.status,
         "remote_url": row.remote_url,
         "remote_url_at": to_db(row.remote_url_at),
+        "open_url": row.open_url,
     }
 
 
@@ -64,8 +67,8 @@ def apply_status(
     rows: Iterable[SessionRow], caps: Capabilities, live: dict[str, LiveSession]
 ) -> list[SessionRow]:
     """`rows` with `status` set from the live sessions: `running` (open in a terminal),
-    `background`, else `idle`. When the installed claude cannot list live sessions every status
-    stays `unknown`."""
+    `background`, else `idle`, and `open_url` from `open_link`. When the installed claude cannot
+    list live sessions every status stays `unknown`."""
     if not caps.has_agents_json:
         return list(rows)
     result: list[SessionRow] = []
@@ -78,7 +81,7 @@ def apply_status(
             if running.kind == "interactive"
             else "background"
         )
-        result.append(replace(row, status=status))
+        result.append(replace(row, status=status, open_url=open_link(row, live)))
     return result
 
 

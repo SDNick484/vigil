@@ -33,8 +33,15 @@ from vigil.index.queries import (
 )
 from vigil.peers import ResumeForwardError
 from vigil.remote import wait_for_remote_url
-from vigil.resume import TERMINAL_ALLOWED, ResumePlan, ResumeRefused, execute, plan_resume
-from vigil.serialize import apply_status, open_link, session_to_dict
+from vigil.resume import (
+    TERMINAL_ALLOWED,
+    ResumePlan,
+    ResumeRefused,
+    execute,
+    joinable_link,
+    plan_resume,
+)
+from vigil.serialize import apply_status, session_to_dict
 from vigil.usage import build_report, catalog_entry_to_dict, refresh_sources, report_to_dict
 from vigil.web import connection, state
 
@@ -75,6 +82,7 @@ class SessionOut(BaseModel):
     status: Status
     remote_url: str | None
     remote_url_at: str | None
+    open_url: str | None
 
 
 class SessionDetailOut(SessionOut):
@@ -322,7 +330,8 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
     whether restarting the session with Remote Control would help.
 
     A request from another machine gets no terminal. It gets the session's Remote Control link
-    instead: the one it already has when it is running in the background, else the one that
+    instead: the one a live session already has (looked for in the index, then in the transcript),
+    else the one that
     shows up (waiting up to `resume.remote_link_timeout`) after the session is started here.
     """
     web = state(request)
@@ -336,8 +345,8 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
         try:
             plan = plan_resume(row, caps, live, web.config.resume, os.environ)
             if remote and plan.start is None:
-                # Already running with a link (plan_resume refuses it without one): start nothing.
-                return _resumed(shlex.join(plan.attach), plan, open_link(row, live))
+                # Live with a link (plan_resume refuses it without one): start nothing.
+                return _resumed(shlex.join(plan.attach), plan, joinable_link(row, live))
             launched_at = datetime.now(UTC)
             attach = execute(plan, conn=conn)
         except ResumeRefused as refused:

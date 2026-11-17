@@ -17,12 +17,14 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from vigil.claude_cli import Capabilities, LiveSession
 from vigil.config import ALLOWED_FLAGS, ResumeConfig
 from vigil.index.queries import SessionRow, record_launch
 from vigil.terminal import terminal_argv
+from vigil.transcript import find_remote_url
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +93,27 @@ def _checked_flags(flags: tuple[str, ...]) -> list[str]:
     return list(flags)
 
 
-def _already_open(running: LiveSession, session: SessionRow) -> str:
+def joinable_link(session: SessionRow, live: dict[str, LiveSession]) -> str | None:
+    """The Remote Control link `session` can be joined by right now, or None when it is not live
+    or has none for its current run. The index is looked at first; when it holds none, the
+    transcript is read directly, since the watcher may not have caught up with a link that
+    was only just written (strictly after the live run started; any link when its start time
+    is unknown)."""
+    # Imported here: vigil.serialize imports this module.
+    from vigil.serialize import open_link
+
+    link = open_link(session, live)
+    running = live.get(session.session_id)
+    if link is not None or running is None:
+        return link
+    after = running.started_at or datetime(1970, 1, 1, tzinfo=UTC)
+    try:
+        return find_remote_url(Path(session.transcript_path), after)
+    except OSError:
+        return None
+
+
+def _already_open(running: LiveSession, session: SessionRow, joinable: bool) -> str:
     details = []
     where = running.cwd or session.cwd
     if where:
@@ -101,8 +123,8 @@ def _already_open(running: LiveSession, session: SessionRow) -> str:
     suffix = f" ({', '.join(details)})" if details else ""
     return (
         f"already open in a terminal{suffix}; continue it there, or close it before resuming "
-        "(vigil never starts a second process on the same session); "
-        "or type /remote-control in that terminal to make it joinable"
+        "(vigil never starts a second process on the same session)"
+        + ("" if joinable else "; or type /remote-control in that terminal to make it joinable")
     )
 
 
@@ -161,25 +183,28 @@ def plan_resume(
 
     Raises ResumeRefused when the session is open in an ordinary terminal, its folder is gone,
     neither `claude --bg` nor tmux is available, `claude` is not on PATH, or the config is bad.
-    A session already running in the background is attached to, never started again; when it has
-    no Remote Control link and `TERMINAL_ALLOWED` is False, there is nothing for the requester to
-    do with it, so that is refused too (`restartable`). A session vigil starts always has
+    A session already running in the background is attached to, never started again. While
+    `TERMINAL_ALLOWED` is False a live session with a Remote Control link (`joinable_link`) gets a
+    plan that starts nothing (the caller answers with the link), even when it is open in a
+    terminal; without a link there is nothing for the requester to do with it, so a background
+    session is refused with `restartable` set. A session vigil starts always has
     `--remote-control`. The plan has no terminal while `TERMINAL_ALLOWED` is False.
     """
     session_id = session.session_id
     if not _SESSION_ID.fullmatch(session_id):
         raise ResumeRefused(f"not a valid session id: {session_id!r}")
     running = live.get(session_id)
-    if running is not None and running.kind == "interactive":
-        raise ResumeRefused(_already_open(running, session))
+    remote = not TERMINAL_ALLOWED.get()
+    link = None
+    if running is not None and (remote or running.kind == "interactive"):
+        link = joinable_link(session, live)
+    if running is not None and running.kind == "interactive" and not (remote and link):
+        raise ResumeRefused(_already_open(running, session, joinable=link is not None))
     cwd = _check_cwd(session.cwd)
 
     start: list[str] | None
     if running is not None:
-        # Imported here: vigil.serialize imports this module.
-        from vigil.serialize import open_link
-
-        if not TERMINAL_ALLOWED.get() and open_link(session, live) is None:
+        if remote and link is None:
             raise ResumeRefused(
                 "running in the background without Remote Control; attach at a desk with "
                 f"`claude attach {session_id}` and type /remote-control, or restart it with "

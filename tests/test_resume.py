@@ -17,7 +17,14 @@ from vigil.config import ResumeConfig
 from vigil.index.db import connect
 from vigil.index.queries import SessionRow
 from vigil.remote import wait_for_remote_url
-from vigil.resume import TERMINAL_ALLOWED, ResumePlan, ResumeRefused, execute, plan_resume
+from vigil.resume import (
+    TERMINAL_ALLOWED,
+    ResumePlan,
+    ResumeRefused,
+    execute,
+    joinable_link,
+    plan_resume,
+)
 
 pytestmark = pytest.mark.usefixtures("proc_version")
 
@@ -395,6 +402,37 @@ def test_interactive_refusal_mentions_remote_control(workdir: Path, env: dict[st
         "; or type /remote-control in that terminal to make it joinable"
     )
     assert refused.value.restartable is False
+
+
+def test_remote_interactive_with_a_link_starts_nothing(workdir: Path, env: dict[str, str]) -> None:
+    live = {SID: LiveSession(SID, "interactive", "demo", str(workdir), started_at=LAUNCH)}
+    session = replace(make_session(str(workdir)), remote_url=LINK, remote_url_at=LAUNCH)
+    token = TERMINAL_ALLOWED.set(False)
+    try:
+        plan = plan_resume(session, ALL_CAPS, live, RC, env)
+    finally:
+        TERMINAL_ALLOWED.reset(token)
+    assert plan.start is None and plan.terminal is None
+    # At the desk it is still an open terminal, but it needs no hint: it is joinable already.
+    with pytest.raises(ResumeRefused) as refused:
+        plan_resume(session, ALL_CAPS, live, RC, env)
+    assert "already open" in refused.value.reason
+    assert "/remote-control" not in refused.value.reason
+
+
+def test_joinable_link_reads_the_transcript_after_the_live_start(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        bridge_line(LINK, LAUNCH - timedelta(minutes=1))
+        + bridge_line("https://claude.ai/code/session_PLACEHOLDER02", LAUNCH + timedelta(minutes=1))
+    )
+    session = replace(make_session(None), transcript_path=str(transcript))
+    started = LiveSession(SID, "background", None, None, started_at=LAUNCH)
+    assert joinable_link(session, {SID: started}) == "https://claude.ai/code/session_PLACEHOLDER02"
+    assert joinable_link(session, {}) is None  # not live
+    unknown_start = LiveSession(SID, "background", None, None)
+    assert joinable_link(session, {SID: unknown_start}) is not None
+    assert joinable_link(make_session(None), {SID: started}) is None  # unreadable transcript
 
 
 def bridge_line(url: str, at: datetime) -> str:

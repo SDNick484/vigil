@@ -757,3 +757,40 @@ def test_peer_remote_url_validated() -> None:
     for bad in ("https://evil.example/x", good + "/../x", good + "?a=1", 7, None):
         session = session_from_dict(canned_session(remote_url=bad, remote_url_at=at), "peer-c")
         assert session is not None and session.remote_url is None
+
+
+def test_peer_open_url_validated() -> None:
+    good = "https://claude.ai/code/session_PLACEHOLDER01"
+    session = session_from_dict(canned_session(open_url=good), "peer-c")
+    assert session is not None and session.open_url == good
+    assert session_to_dict(session)["open_url"] == good
+    for bad in ("https://evil.example/x", good + "?a=1", 7, None):
+        session = session_from_dict(canned_session(open_url=bad), "peer-c")
+        assert session is not None and session.open_url is None
+    session = session_from_dict(canned_session(), "peer-c")
+    assert session is not None and session.open_url is None
+
+
+def test_peer_row_shows_open_only_from_open_url(machines: Machines) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    answer = canned_session(status="background", remote_url=link, open_url=None)
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[answer])
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    row_id = f"peer-peer-c-{C_SESSION}"
+    # A link and a live session, but the owner did not say it is joinable: no guess.
+    machines.hub.forget("peer-c")
+    page = machines.laptop.get("/").text
+    assert 'class="open"' not in row_html(page, row_id)
+    assert link not in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text
+    # The owner says it is.
+    answer["open_url"] = link
+    machines.hub.forget("peer-c")
+    page = machines.laptop.get("/").text
+    assert f'<a class="open" href="{link}" rel="noopener">Open in Claude</a>' in row_html(
+        page, row_id
+    )
+    machines.hub.forget("peer-c")
+    assert link in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text

@@ -427,7 +427,8 @@ def install_claude(
             help=CLAUDE_BG,
         )
     )
-    thaw_tree(transcript.parent)
+    if link is not None:  # the fake may append to the transcript
+        thaw_tree(transcript.parent)
 
 
 @pytest.fixture
@@ -553,8 +554,80 @@ def test_open_button_says_open_for_remote_requests(
         LINK, "2026-11-17T11:05:00.000000+00:00", NAMED)  # fmt: skip
     live = [{"sessionId": NAMED, "kind": "background", "cwd": str(tmp_path)}]
     install_claude(vigil_env, transcript=tmp_path / "unused", link=None, live=live)
+    freeze_tree(vigil_env.claude_home)  # showing the page only reads
     page = remote_client.get("/", headers={"Accept": "text/html"}).text
     assert f'<a class="open" href="{LINK}" rel="noopener">Open</a>' in page
     assert "Open in Claude" not in page.split("htmx:beforeSwap")[0]
     detail = remote_client.get(f"/sessions/{NAMED}", headers={"Accept": "text/html"}).text
     assert f'<a class="open" href="{LINK}" rel="noopener">Open</a>' in detail
+
+
+def append_bridge(transcript: Path, at: datetime) -> None:
+    record = {
+        "type": "system",
+        "subtype": "bridge_status",
+        "url": LINK,
+        "timestamp": at.isoformat(),
+    }
+    thaw_tree(transcript.parent)
+    with transcript.open("a") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def test_remote_tap_finds_a_link_the_index_has_not_caught_up_with(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    began = datetime.now(UTC) - timedelta(minutes=10)
+    assert row_of(vigil_env, NAMED).remote_url is None  # nothing indexed
+    append_bridge(transcript, began + timedelta(minutes=1))
+    live = [{"sessionId": NAMED, "kind": "background", "startedAt": int(began.timestamp() * 1000)}]
+    install_claude(vigil_env, transcript=transcript, link=None, live=live)
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json()["remote_url"] == LINK and response.json()["pending"] is False
+    assert started(vigil_env) == []
+    # A link from before this run started is not this run's.
+    sql(vigil_env, "UPDATE sessions SET remote_url = NULL WHERE session_id = ?", NAMED)
+    live[0]["startedAt"] = int((began + timedelta(minutes=5)).timestamp() * 1000)
+    install_claude(vigil_env, transcript=transcript, link=None, live=live)
+    remote_client.app.state.vigil.live.clear()  # type: ignore[attr-defined]
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 409 and response.json()["restartable"] is True
+
+
+def test_remote_tap_on_interactive_session_with_a_link(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    began = datetime.now(UTC) - timedelta(minutes=10)
+    live = [{"sessionId": NAMED, "kind": "interactive", "startedAt": int(began.timestamp() * 1000)}]
+    install_claude(vigil_env, transcript=transcript, link=None, live=live)
+    # No link: refused as an open terminal, with the hint to make it joinable.
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 409
+    assert response.json()["restartable"] is False
+    assert "type /remote-control in that terminal" in response.json()["reason"]
+    # A link only in the transcript, then one in the index: both are answered, nothing started.
+    append_bridge(transcript, began + timedelta(minutes=1))
+    for _ in range(2):
+        response = remote_client.post(f"/sessions/{NAMED}/resume")
+        assert response.status_code == 200, response.text
+        assert response.json()["remote_url"] == LINK
+        sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+            LINK, (began + timedelta(minutes=1)).isoformat(), NAMED)  # fmt: skip
+    assert started(vigil_env) == []
+
+
+def test_api_serves_open_url(vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path) -> None:
+    began = datetime.now(UTC) - timedelta(minutes=10)
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, (began + timedelta(minutes=1)).isoformat(), NAMED)  # fmt: skip
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, (began + timedelta(minutes=1)).isoformat(), PLAIN)  # fmt: skip
+    live = [{"sessionId": NAMED, "kind": "background", "startedAt": int(began.timestamp() * 1000)}]
+    install_claude(vigil_env, transcript=tmp_path / "x", link=None, live=live)
+    by_id = {s["id"]: s for s in web_client.get("/api/v1/sessions").json()}
+    assert by_id[NAMED]["open_url"] == LINK  # live, with this run's link
+    assert by_id[PLAIN]["open_url"] is None  # a link, but not live
+    assert web_client.get(f"/api/v1/sessions/{NAMED}").json()["open_url"] == LINK

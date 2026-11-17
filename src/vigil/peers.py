@@ -233,6 +233,9 @@ def session_from_dict(
     remote_url = data.get("remote_url")
     if not isinstance(remote_url, str) or not REMOTE_URL.fullmatch(remote_url):
         remote_url = None
+    open_url = data.get("open_url")
+    if not isinstance(open_url, str) or not REMOTE_URL.fullmatch(open_url):
+        open_url = None
     snippets = {key: _text(data, key, TEXT_LIMIT) for key in _SNIPPETS}
     return PeerSession(
         session_id=session_id,
@@ -262,6 +265,7 @@ def session_from_dict(
         status=cast(Status, status) if status in _STATUSES and not stale else "unknown",
         remote_url=remote_url,
         remote_url_at=_time(data, "remote_url_at") if remote_url else None,
+        open_url=open_url,
         peer=peer,
         stale=stale,
     )

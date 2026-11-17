@@ -19,7 +19,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from vigil.claude_cli import LiveSession
 from vigil.commands import resume_command
 from vigil.index.queries import SessionRow, chain, get_session, list_projects, list_sessions
 from vigil.peers import (
@@ -30,7 +29,7 @@ from vigil.peers import (
     with_machine,
 )
 from vigil.resume import TERMINAL_ALLOWED
-from vigil.serialize import apply_status, display_name, open_link
+from vigil.serialize import apply_status, display_name
 from vigil.usage import build_report, refresh_sources
 from vigil.web import connection, state
 
@@ -76,20 +75,11 @@ def row_key(row: SessionRow) -> str:
     return f"{peer}-{row.session_id}" if peer else row.session_id
 
 
-def open_links(rows: list[SessionRow], live: dict[str, LiveSession]) -> dict[str, str]:
-    """The Remote Control link to offer for each of `rows` that has one, by `row_key`: this
-    machine's sessions by `vigil.serialize.open_link`. A peer's session shows the link its
-    owner last sent while it is running or in the background and the peer is reachable; its
-    live start time is not known here."""
-    links: dict[str, str] = {}
-    for row in rows:
-        if isinstance(row, PeerSession):
-            link = row.remote_url if is_active(row) else None
-        else:
-            link = open_link(row, live)
-        if link is not None:
-            links[row_key(row)] = link
-    return links
+def open_links(rows: list[SessionRow]) -> dict[str, str]:
+    """The Remote Control link to offer for each of `rows` that has one, by `row_key`: the
+    `open_url` the owning machine worked out from its live sessions (`apply_status` for this
+    machine's own, what the peer sent for a peer's). A stale peer row offers none."""
+    return {row_key(r): r.open_url for r in rows if r.open_url is not None and not _stale(r)}
 
 
 def resume_url(row: SessionRow) -> str:
@@ -106,6 +96,10 @@ templates.env.globals["peer_of"] = peer_of
 templates.env.globals["session_url"] = session_url
 templates.env.globals["resume_url"] = resume_url
 templates.env.globals["row_key"] = row_key
+
+
+def _stale(row: SessionRow) -> bool:
+    return isinstance(row, PeerSession) and row.stale
 
 
 def is_active(row: SessionRow) -> bool:
@@ -238,7 +232,7 @@ def sessions_page(
         "all": all_,
         "machines": bool(web.config.peers),
         "offline": offline,
-        "open_links": open_links(rows, live),
+        "open_links": open_links(rows),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     if request.headers.get("hx-request") == "true":
@@ -266,7 +260,7 @@ def session_page(request: Request, session_id: str) -> Any:
         "chain": links if len(links) > 1 else [],
         "command": resume_command(row),
         "machine": local_machine(web.config),
-        "open_links": open_links([row], live),
+        "open_links": open_links([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)
@@ -291,7 +285,7 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         "command": resume_command(row),
         "machine": peer,
         "result": result,
-        "open_links": open_links([row], {}),
+        "open_links": open_links([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)
