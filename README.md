@@ -181,9 +181,10 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | --- | --- | --- |
 | `claude_home` | `"~/.claude"` | Claude Code's data folder. vigil only reads it and never writes there. |
 | `port` | `7787` | Port for `vigil serve`, 1 to 65535. |
-| `resume.default_flags` | `[]` | Flags added to every resume. Only `--remote-control`, `--model`, `--effort`, `--permission-mode` and `--name` are allowed, each optionally followed by its value, e.g. `["--model", "opus"]`. |
+| `resume.default_flags` | `[]` | Flags added to every resume (vigil always adds `--remote-control` itself). Only `--remote-control`, `--model`, `--effort`, `--permission-mode` and `--name` are allowed, each optionally followed by its value, e.g. `["--model", "opus"]`. |
 | `resume.terminal_command` | unset | Command template that opens a terminal. Must contain `{attach}`, e.g. `"mate-terminal -- {attach}"`. Unset means `$TERMINAL`, then a list of known terminals. |
 | `resume.launcher` | `"auto"` | `"auto"` uses `claude --bg` when the installed `claude` supports it and falls back to tmux; `"bg"` and `"tmux"` force one. |
+| `resume.remote_link_timeout` | `30` | Seconds, 1 to 300, to wait for a session's Remote Control link after Resume starts it for a request from another device. |
 | `usage.shell_history` | `false` | Read your shell history to see how you launch `claude`. Off unless you turn it on. |
 | `usage.history_files` | `[]` | History files to read. Empty means the default bash, zsh and fish locations. A leading `~` is expanded. |
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |

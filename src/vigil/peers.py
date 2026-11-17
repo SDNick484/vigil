@@ -50,9 +50,10 @@ PEER_TIMEOUT = 3.0
 """Seconds a sessions fetch may spend connecting, and waiting for each read; the whole answer
 must also be in within this many seconds of starting (checked as it is read)."""
 
-RESUME_TIMEOUT = 30.0
-"""Seconds a peer has to answer a forwarded resume once connected (it waits for `claude --bg` or
-tmux to start, up to 20 s); connecting still has `PEER_TIMEOUT`."""
+RESUME_TIMEOUT = 330.0
+"""Seconds a peer has to answer a forwarded resume once connected: it waits for `claude --bg` or
+tmux to start (up to 20 s), then for the Remote Control link (up to 300 s, the most
+`resume.remote_link_timeout` allows); connecting still has `PEER_TIMEOUT`."""
 
 FETCH_LIMIT = 10_000
 """Most sessions taken from one peer."""
@@ -342,10 +343,12 @@ def fetch_peer_sessions(
 class ResumeForwardError(Exception):
     """A forwarded resume did not go ahead: answer `status` with `reason` (user-facing)."""
 
-    def __init__(self, status: int, reason: str) -> None:
+    def __init__(self, status: int, reason: str, *, restartable: bool = False) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
+        self.restartable = restartable
+        """The peer says restarting the session with Remote Control would get past a 409."""
 
 
 def forward_resume(
@@ -355,7 +358,9 @@ def forward_resume(
     peer's token). The peer starts it there; asked from another machine it never opens a
     terminal, and answers with the attach command to run on it.
 
-    Returns `{"ok": True, "attach", "opened_terminal", "machine"}`. Raises ResumeForwardError:
+    Returns `{"ok": True, "attach", "opened_terminal", "remote_url", "pending", "machine"}`
+    (`remote_url` is the peer's Remote Control link when it is a Claude one, else None; `pending`
+    says it started the session but the link is not there yet). Raises ResumeForwardError:
     404 for an id that is not a session id, the peer's own 404 or 409 refusal (reason prefixed
     with the peer's name), else 502 when the peer cannot be reached or refuses the request."""
     if not _SESSION_ID.fullmatch(session_id):
@@ -378,16 +383,25 @@ def forward_resume(
     if not isinstance(data, dict):
         data = {}
     if response.status_code in (404, 409) and isinstance(data.get("reason"), str):
-        raise ResumeForwardError(response.status_code, f"{peer.name}: {data['reason']}")
+        raise ResumeForwardError(
+            response.status_code,
+            f"{peer.name}: {data['reason']}",
+            restartable=data.get("restartable") is True,
+        )
     if response.status_code != 200:
         raise ResumeForwardError(502, f"{peer.name}: {_status_problem(response)}")
     attach = data.get("attach")
     if data.get("ok") is not True or not isinstance(attach, str):
         raise ResumeForwardError(502, f"{peer.name}: answered something that is not a resume")
+    remote_url = data.get("remote_url")
+    if not isinstance(remote_url, str) or not REMOTE_URL.fullmatch(remote_url):
+        remote_url = None  # it goes into the user's browser: only ever a Claude link
     return {
         "ok": True,
         "attach": attach,
         "opened_terminal": data.get("opened_terminal") is True,
+        "remote_url": remote_url,
+        "pending": data.get("pending") is True,
         "machine": peer.name,
     }
 

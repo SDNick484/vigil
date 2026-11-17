@@ -125,3 +125,13 @@ def test_xdg_defaults_and_relative_values_ignored(
     monkeypatch.setenv("XDG_DATA_HOME", "relative/path")
     assert config_path() == tmp_path / ".config" / "vigil" / "config.toml"
     assert index_path() == tmp_path / ".local" / "share" / "vigil" / "index.db"
+
+
+def test_remote_link_timeout_bounds(tmp_path: Path) -> None:
+    assert load_config(write(tmp_path, "")).resume.remote_link_timeout == 30.0
+    for value, expected in (("1", 1.0), ("12.5", 12.5), ("300", 300.0)):
+        config = load_config(write(tmp_path, f"[resume]\nremote_link_timeout = {value}\n"))
+        assert config.resume.remote_link_timeout == expected
+    for value in ("0", "0.5", "301", "-1", "'30'", "true"):
+        with pytest.raises(ConfigError, match="resume.remote_link_timeout"):
+            load_config(write(tmp_path, f"[resume]\nremote_link_timeout = {value}\n"))

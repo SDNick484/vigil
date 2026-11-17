@@ -1,4 +1,8 @@
+import json
+import os
 import sqlite3
+import sys
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,13 +11,15 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import VigilEnv, freeze_tree
+from tests.conftest import VigilEnv, freeze_tree, thaw_tree
 from vigil.claude_cli import LiveSession
+from vigil.config import load_config
 from vigil.index.db import connect
 from vigil.index.queries import SessionRow, get_session, list_sessions
-from vigil.index.scanner import link_chains
+from vigil.index.scanner import link_chains, scan
 from vigil.serialize import open_link, session_to_dict
 from vigil.web.api import SessionOut
+from vigil.web.app import create_app
 
 NAMED = "e47d2def-0bb3-4d50-9f9c-8e38e4cdcfba"  # titled "fixture-named"
 NEWEST = "f26f1b2c-d3b2-4389-b0ed-aba7e19e8594"
@@ -233,9 +239,13 @@ def test_resume_ok_returns_attach(
         "ok": True,
         "attach": f"claude attach {NAMED}",
         "opened_terminal": False,
+        "remote_url": None,
+        "pending": False,
     }
     started = [c for c in vigil_env.bin.calls("claude") if "--resume" in c.argv]
-    assert [(c.argv, c.cwd) for c in started] == [(["--bg", "--resume", NAMED], str(folder))]
+    assert [(c.argv, c.cwd) for c in started] == [
+        (["--bg", "--resume", NAMED, "--remote-control"], str(folder))
+    ]
     conn = connect(vigil_env.index)
     launches = conn.execute("SELECT source, session_id FROM launches").fetchall()
     conn.close()
@@ -254,6 +264,8 @@ def test_resume_opens_terminal_when_there_is_one(
         "ok": True,
         "attach": f"claude attach {NAMED}",
         "opened_terminal": True,
+        "remote_url": None,
+        "pending": False,
     }
 
 
@@ -264,6 +276,7 @@ def test_resume_refused_409(vigil_env: VigilEnv, web_client: TestClient) -> None
     assert response.json() == {
         "ok": False,
         "reason": "folder no longer exists: /home/user/src/fixture-repo",
+        "restartable": False,
     }
     assert all("--resume" not in call.argv for call in vigil_env.bin.calls("claude"))
 
@@ -368,3 +381,180 @@ def test_open_link_only_when_live_and_newer(vigil_env: VigilEnv, web_client: Tes
     assert open_link(row, live(at + timedelta(minutes=1))) is None  # from an earlier run
     assert open_link(replace(row, remote_url=None), live(None)) is None
     assert open_link(replace(row, remote_url_at=None), live(at)) is None
+
+
+LINK = "https://claude.ai/code/session_PLACEHOLDER01"
+REMOTE_HOST = "vigil.example"
+REMOTE_URL = f"http://{REMOTE_HOST}:7787"
+REMOTE_PEER = ("192.0.2.10", 50000)  # TEST-NET-1: never a real client
+TOKEN = "test-token-" + "0123456789abcdef" * 2  # a placeholder, not a real secret
+
+_LINKING_CLAUDE = """#!{python}
+import datetime, json, os, sys
+with open({log!r}, "a") as handle:
+    handle.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
+if "agents" in sys.argv:
+    sys.stdout.write({live!r})
+    sys.exit(0)
+if "--bg" in sys.argv and {link!r}:
+    record = {{"type": "system", "subtype": "bridge_status", "url": {link!r},
+              "timestamp": datetime.datetime.now(datetime.UTC).isoformat()}}
+    with open({transcript!r}, "a") as handle:
+        handle.write(json.dumps(record) + "\\n")
+sys.stdout.write({help!r})
+"""
+
+
+def install_claude(
+    env: VigilEnv,
+    *,
+    transcript: Path,
+    link: str | None,
+    live: Sequence[Mapping[str, object]] | None = None,
+) -> None:
+    """A fake `claude` that reports `live` for `agents --json` and, when started with `--bg`,
+    appends a `bridge_status` line with `link` to `transcript` (as Claude Code would once Remote
+    Control is up). It records its argv and cwd like every FakeBin program."""
+    env.bin.install("claude", stdout=CLAUDE_BG)
+    script = env.bin.directory / "claude"
+    script.write_text(
+        _LINKING_CLAUDE.format(
+            python=sys.executable,
+            log=str(env.bin.directory / ".calls" / "claude.jsonl"),
+            live=json.dumps(live or []),
+            link=link,
+            transcript=str(transcript),
+            help=CLAUDE_BG,
+        )
+    )
+    thaw_tree(transcript.parent)
+
+
+@pytest.fixture
+def remote_client(vigil_env: VigilEnv, tmp_path: Path) -> Iterator[TestClient]:
+    """The service with remote access on, and a client that reaches it from another machine with
+    the token. Waiting for a Remote Control link gives up after 0.1 s."""
+    token = tmp_path / "token"
+    token.write_text(TOKEN + "\n")
+    token.chmod(0o600)
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "vigil" / "config.toml"
+    config.write_text(
+        f'claude_home = "{vigil_env.claude_home}"\n\n'
+        f'[server]\ntoken_file = "{token}"\nallowed_hosts = ["{REMOTE_HOST}"]\n'
+    )
+    conn = connect(vigil_env.index)
+    scan(conn, vigil_env.claude_home)
+    conn.close()
+    app = create_app(
+        load_config(), conn_factory=lambda: connect(vigil_env.index), start_watcher=False
+    )
+    web = app.state.vigil
+    web.config = replace(web.config, resume=replace(web.config.resume, remote_link_timeout=0.1))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(app, base_url=REMOTE_URL, client=REMOTE_PEER, headers=headers) as client:
+        yield client
+
+
+def start_in(env: VigilEnv, folder: Path) -> Path:
+    """Give NAMED a working folder that exists; return its transcript."""
+    sql(env, "UPDATE sessions SET cwd = ? WHERE session_id = ?", str(folder), NAMED)
+    return Path(row_of(env, NAMED).transcript_path)
+
+
+def started(env: VigilEnv) -> list[list[str]]:
+    return [c.argv for c in env.bin.calls("claude") if "--bg" in c.argv]
+
+
+def test_remote_resume_returns_link(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(vigil_env, transcript=transcript, link=LINK)
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED}",
+        "opened_terminal": False,
+        "remote_url": LINK,
+        "pending": False,
+    }
+    assert started(vigil_env) == [["--bg", "--resume", NAMED, "--remote-control"]]
+
+
+def test_remote_resume_ignores_older_link(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    old = {"type": "system", "subtype": "bridge_status", "url": LINK}
+    old["timestamp"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    thaw_tree(transcript.parent)
+    with transcript.open("a") as handle:
+        handle.write(json.dumps(old) + "\n")
+    install_claude(vigil_env, transcript=transcript, link=None)  # the launch writes no link
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED}",
+        "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,
+    }
+    assert len(started(vigil_env)) == 1  # it did start
+
+
+def test_second_remote_tap_opens_existing_link(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    began = datetime.now(UTC) - timedelta(minutes=10)
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, (began + timedelta(minutes=1)).isoformat(), NAMED)  # fmt: skip
+    live = [
+        {
+            "sessionId": NAMED,
+            "kind": "background",
+            "cwd": str(tmp_path),
+            "startedAt": int(began.timestamp() * 1000),
+        }
+    ]
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=live)
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED}",
+        "opened_terminal": False,
+        "remote_url": LINK,
+        "pending": False,
+    }
+    assert started(vigil_env) == []  # nothing was started
+
+
+def test_remote_resume_of_background_session_without_link_is_restartable(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    live = [{"sessionId": NAMED, "kind": "background", "cwd": str(tmp_path)}]
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=live)
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["ok"] is False and body["restartable"] is True
+    assert "without Remote Control" in body["reason"]
+    assert started(vigil_env) == []
+
+
+def test_open_button_says_open_for_remote_requests(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, "2026-11-17T11:05:00.000000+00:00", NAMED)  # fmt: skip
+    live = [{"sessionId": NAMED, "kind": "background", "cwd": str(tmp_path)}]
+    install_claude(vigil_env, transcript=tmp_path / "unused", link=None, live=live)
+    page = remote_client.get("/", headers={"Accept": "text/html"}).text
+    assert f'<a class="open" href="{LINK}" rel="noopener">Open</a>' in page
+    assert "Open in Claude" not in page.split("htmx:beforeSwap")[0]
+    detail = remote_client.get(f"/sessions/{NAMED}", headers={"Accept": "text/html"}).text
+    assert f'<a class="open" href="{LINK}" rel="noopener">Open</a>' in detail

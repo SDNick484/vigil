@@ -33,7 +33,22 @@
       try { data = JSON.parse(xhr.responseText); } catch (err) { /* shown as a failure below */ }
       var target = event.detail.target;
       target.replaceChildren();
-      if (data.ok === true && data.attach) {
+      // Only ever to a Claude link: the answer may have come from another machine.
+      var link = typeof data.remote_url === "string" && /^https:\/\/claude\.ai\/code\//.test(data.remote_url) ? data.remote_url : null;
+      if (data.ok === true && link) {
+        var open = document.createElement("a");
+        open.href = link;
+        open.textContent = "Open in Claude";
+        target.className = "result ok";
+        target.append("Opening Claude: ", open);
+        window.location.href = link;
+      } else if (data.ok === true && data.pending === true) {
+        var page = document.createElement("a");
+        page.href = new URL(xhr.responseURL).pathname.replace(/\/resume$/, "");
+        page.textContent = "the session page";
+        target.className = "result ok";
+        target.append("Started; the Remote Control link is not available yet. Try ", page, " in a moment.");
+      } else if (data.ok === true && data.attach) {
         var code = document.createElement("code");
         code.textContent = data.attach;
         target.className = "result ok";
@@ -45,6 +60,15 @@
       } else {
         target.className = "result refused";
         target.append(data.reason || data.detail || "Request failed (" + xhr.status + ")");
+        if (data.restartable === true) {
+          // Shown once the restart is wired up (it is a separate action).
+          var restart = document.createElement("button");
+          restart.type = "button";
+          restart.className = "restart";
+          restart.hidden = true;
+          restart.textContent = "Restart with Remote Control";
+          target.append(" ", restart);
+        }
       }
     });
   </script>

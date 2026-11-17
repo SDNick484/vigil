@@ -20,6 +20,8 @@
             onclick="navigator.clipboard.writeText(this.dataset.copy)">Copy</button>
   </p>
   {% if result and result.stale %}<p class="result refused">{{ machine }} cannot be reached ({{ result.error }}); this is what it last sent{% if result.fetched_at %}, at {{ result.fetched_at|when }}{% endif %}.</p>{% endif %}
+  {% set link = open_links.get(row_key(row)) %}
+  {% if link %}<p><a class="open" href="{{ link }}" rel="noopener">{{ "Open in Claude" if at_desk else "Open" }}</a></p>{% endif %}
   <form method="post" action="{{ resume_url(row) }}"
         hx-post="{{ resume_url(row) }}" hx-target="#resume-result">
     <button type="submit">Resume</button>

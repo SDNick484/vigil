@@ -45,9 +45,11 @@ machine's screen is of no use to that user, so they get the attach command inste
 class ResumeRefused(Exception):
     """Resume cannot (or will not) go ahead; `reason` is user-facing text."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, restartable: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.restartable = restartable
+        """Stopping the session and starting it again with Remote Control would get past this."""
 
 
 @dataclass(frozen=True)
@@ -99,8 +101,17 @@ def _already_open(running: LiveSession, session: SessionRow) -> str:
     suffix = f" ({', '.join(details)})" if details else ""
     return (
         f"already open in a terminal{suffix}; continue it there, or close it before resuming "
-        "(vigil never starts a second process on the same session)"
+        "(vigil never starts a second process on the same session); "
+        "or type /remote-control in that terminal to make it joinable"
     )
+
+
+def _with_remote_control(flags: list[str]) -> list[str]:
+    """`flags` with `--remote-control` in front, unless they already have it: every session vigil
+    starts can be joined from a phone."""
+    if any(token.split("=", 1)[0] == "--remote-control" for token in flags):
+        return flags
+    return ["--remote-control", *flags]
 
 
 def _check_cwd(cwd: str | None) -> str:
@@ -150,8 +161,10 @@ def plan_resume(
 
     Raises ResumeRefused when the session is open in an ordinary terminal, its folder is gone,
     neither `claude --bg` nor tmux is available, `claude` is not on PATH, or the config is bad.
-    A session already running in the background is attached to, never started again. The plan
-    has no terminal while `TERMINAL_ALLOWED` is False.
+    A session already running in the background is attached to, never started again; when it has
+    no Remote Control link and `TERMINAL_ALLOWED` is False, there is nothing for the requester to
+    do with it, so that is refused too (`restartable`). A session vigil starts always has
+    `--remote-control`. The plan has no terminal while `TERMINAL_ALLOWED` is False.
     """
     session_id = session.session_id
     if not _SESSION_ID.fullmatch(session_id):
@@ -163,11 +176,21 @@ def plan_resume(
 
     start: list[str] | None
     if running is not None:
+        # Imported here: vigil.serialize imports this module.
+        from vigil.serialize import open_link
+
+        if not TERMINAL_ALLOWED.get() and open_link(session, live) is None:
+            raise ResumeRefused(
+                "running in the background without Remote Control; attach at a desk with "
+                f"`claude attach {session_id}` and type /remote-control, or restart it with "
+                "Remote Control (this interrupts it)",
+                restartable=True,
+            )
         method: Literal["bg", "tmux"] = "bg"
         start = None
         attach = ["claude", "attach", session_id]
     else:
-        flags = _checked_flags(cfg.default_flags)
+        flags = _with_remote_control(_checked_flags(cfg.default_flags))
         method = _method(caps, cfg, env)
         if method == "bg":
             start = ["claude", "--bg", "--resume", session_id, *flags]

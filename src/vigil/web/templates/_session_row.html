@@ -1,5 +1,6 @@
 {% set peer = peer_of(s) %}
-{% set key = (peer ~ "-" ~ s.session_id) if peer else s.session_id %}
+{% set key = row_key(s) %}
+{% set link = open_links.get(key) %}
 <li class="session{% if s.archived %} archived{% endif %}{% if s.stale %} stale{% endif %}{% if folded %} folded{% endif %}" id="{{ 'peer-' if peer else 'row-' }}{{ key }}">
   <div class="name">
     <a href="{{ session_url(s) }}">{{ session_name(s) or preview(s.first_prompt) or s.session_id[:8] }}</a>
@@ -15,6 +16,7 @@
     {% if machines %}<span class="machine">{{ s.machine }}</span>{% endif %}
   </div>
   <div class="actions">
+    {% if link %}<a class="open" href="{{ link }}" rel="noopener">{{ "Open in Claude" if at_desk else "Open" }}</a>{% endif %}
     <form method="post" action="{{ resume_url(s) }}"
           hx-post="{{ resume_url(s) }}" hx-target="#resume-{{ key }}">
       <button type="submit">Resume</button>

@@ -385,3 +385,43 @@ def test_summary_line(web_client: TestClient) -> None:
     assert f"<strong>{total - 3}</strong> idle" in page
     assert "across 2 projects" in page
     assert "Quiet" in page  # broken-repo
+
+
+LINK = "https://claude.ai/code/session_PLACEHOLDER01"
+
+
+def test_open_link_on_live_row_and_detail_page(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, "2026-11-17T11:05:00.000000+00:00", NAMED)  # fmt: skip
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, "2026-11-17T11:05:00.000000+00:00", FORKED)  # fmt: skip
+    # Idle: a link from an earlier run is not offered.
+    page = web_client.get("/").text
+    assert LINK not in page
+    assert LINK not in web_client.get(f"/sessions/{NAMED}").text
+
+    make_live(web_client, {NAMED: "background"})
+    page = web_client.get("/").text
+    # At the desk (a loopback request) it is "Open in Claude", a plain link, beside Resume.
+    assert f'<a class="open" href="{LINK}" rel="noopener">Open in Claude</a>' in row_html(
+        page, f"row-{NAMED}"
+    )
+    assert "Resume</button>" in row_html(page, f"row-{NAMED}")
+    detail = web_client.get(f"/sessions/{NAMED}").text
+    assert f'<a class="open" href="{LINK}" rel="noopener">Open in Claude</a>' in detail
+    # Only the live session with a link gets one (FORKED has a link but is idle).
+    assert page.count(LINK) == 1
+
+
+def test_resume_answer_handler_follows_link_and_offers_restart(web_client: TestClient) -> None:
+    page = web_client.get("/").text
+    for text in (
+        "data.remote_url",
+        "window.location.href = link",
+        "data.pending",
+        "the Remote Control link is not available yet",
+        "data.restartable",
+        "Restart with Remote Control",
+        "restart.hidden = true",
+    ):
+        assert text in page, text

@@ -6,6 +6,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -462,6 +463,7 @@ def test_safe_next() -> None:
 
 def test_remote_resume_does_not_open_terminal(
     vigil_env: VigilEnv,
+    remote_app: FastAPI,
     client_for: ClientFactory,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -475,12 +477,16 @@ def test_remote_resume_does_not_open_terminal(
     monkeypatch.setenv("DISPLAY", ":99")  # a terminal could be opened here
 
     remote = client_for()
+    web = remote_app.state.vigil
+    web.config = replace(web.config, resume=replace(web.config.resume, remote_link_timeout=0.1))
     response = remote.post(f"/sessions/{NAMED}/resume", headers=bearer())
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
         "attach": f"claude attach {NAMED}",
         "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,  # no Remote Control link turned up in the (short) wait
     }
     # From the browser, with the cookie: the same.
     log_in(remote)

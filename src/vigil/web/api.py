@@ -7,7 +7,9 @@ its status from the live sessions, cached for a few seconds (`vigil.web.LiveStat
 """
 
 import os
-from datetime import datetime
+import shlex
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -30,8 +32,9 @@ from vigil.index.queries import (
     set_meta,
 )
 from vigil.peers import ResumeForwardError
-from vigil.resume import ResumeRefused, execute, plan_resume
-from vigil.serialize import apply_status, session_to_dict
+from vigil.remote import wait_for_remote_url
+from vigil.resume import TERMINAL_ALLOWED, ResumePlan, ResumeRefused, execute, plan_resume
+from vigil.serialize import apply_status, open_link, session_to_dict
 from vigil.usage import build_report, catalog_entry_to_dict, refresh_sources, report_to_dict
 from vigil.web import connection, state
 
@@ -125,14 +128,24 @@ class HealthOut(BaseModel):
 
 
 class ResumeOut(BaseModel):
+    """`remote_url` is the session's Remote Control link, set for a request from another machine
+    (which gets no terminal) once the session has one; `pending` says the session was started for
+    that request but no link had appeared within `resume.remote_link_timeout`."""
+
     ok: Literal[True]
     attach: str
     opened_terminal: bool
+    remote_url: str | None = None
+    pending: bool = False
 
 
 class RefusalOut(BaseModel):
+    """`restartable` (resume refusals only): stopping the session and starting it again with
+    Remote Control would get past the refusal."""
+
     ok: Literal[False]
     reason: str
+    restartable: bool = False
 
 
 class ForwardedResumeOut(ResumeOut):
@@ -289,8 +302,11 @@ def health(request: Request) -> dict[str, object]:
     }
 
 
-def _refusal(status: int, reason: str) -> JSONResponse:
-    return JSONResponse({"ok": False, "reason": reason}, status_code=status)
+def _refusal(status: int, reason: str, *, restartable: bool | None = None) -> JSONResponse:
+    body: dict[str, object] = {"ok": False, "reason": reason}
+    if restartable is not None:
+        body["restartable"] = restartable
+    return JSONResponse(body, status_code=status)
 
 
 @actions.post(
@@ -302,9 +318,15 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
     """Resume an indexed session in its folder and open a terminal on it when one is available.
 
     The command is built from the indexed id and folder only. 409 when resume is refused (open in
-    a terminal, folder gone, nothing to launch with); the reason says why.
+    a terminal, folder gone, nothing to launch with); the reason says why, and `restartable`
+    whether restarting the session with Remote Control would help.
+
+    A request from another machine gets no terminal. It gets the session's Remote Control link
+    instead: the one it already has when it is running in the background, else the one that
+    shows up (waiting up to `resume.remote_link_timeout`) after the session is started here.
     """
     web = state(request)
+    remote = not TERMINAL_ALLOWED.get()
     with connection(request) as conn:
         row = get_session(conn, session_id)
         if row is None:
@@ -313,11 +335,32 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
         caps, live = web.live.get(fresh=True)
         try:
             plan = plan_resume(row, caps, live, web.config.resume, os.environ)
+            if remote and plan.start is None:
+                # Already running with a link (plan_resume refuses it without one): start nothing.
+                return _resumed(shlex.join(plan.attach), plan, open_link(row, live))
+            launched_at = datetime.now(UTC)
             attach = execute(plan, conn=conn)
         except ResumeRefused as refused:
-            return _refusal(409, refused.reason)
+            return _refusal(409, refused.reason, restartable=refused.restartable)
     web.live.clear()
-    return {"ok": True, "attach": attach, "opened_terminal": plan.terminal is not None}
+    if not remote:
+        return _resumed(attach, plan, None)
+    link = wait_for_remote_url(
+        Path(row.transcript_path), launched_at, web.config.resume.remote_link_timeout
+    )
+    return _resumed(attach, plan, link, pending=link is None)
+
+
+def _resumed(
+    attach: str, plan: ResumePlan, link: str | None, *, pending: bool = False
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "attach": attach,
+        "opened_terminal": plan.terminal is not None,
+        "remote_url": link,
+        "pending": pending,
+    }
 
 
 @actions.post(
@@ -336,7 +379,11 @@ def resume_on_peer(
     try:
         return state(request).peers.resume(peer, session_id)
     except ResumeForwardError as refused:
-        return _refusal(refused.status, refused.reason)
+        return _refusal(
+            refused.status,
+            refused.reason,
+            restartable=refused.restartable if refused.status == 409 else None,
+        )
 
 
 _META_FIELDS = ("label", "note", "pinned", "archived")

@@ -32,7 +32,7 @@ from tests.conftest import (
     VigilEnv,
 )
 from vigil import peers
-from vigil.config import Config, ConfigError, Peer, ServerConfig, load_config
+from vigil.config import Config, ConfigError, Peer, ResumeConfig, ServerConfig, load_config
 from vigil.index.db import connect
 from vigil.index.queries import list_sessions, set_meta
 from vigil.index.scanner import scan
@@ -185,6 +185,7 @@ def machines(vigil_env: VigilEnv, tmp_path: Path) -> Iterator[Machines]:
     token_b_server = write_token(tmp_path / "peer_b_server_token", TOKEN_B)
     config_b = Config(
         claude_home=home_b,
+        resume=ResumeConfig(remote_link_timeout=0.1),
         server=ServerConfig(token_file=token_b_server, allowed_hosts=(PEER_B_HOST,)),
     )
     app_b = create_app(config_b, conn_factory=lambda: connect(index_b), start_watcher=False)
@@ -441,12 +442,14 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
         "ok": True,
         "attach": f"claude attach {HANDMADE}",
         "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,  # a link did not turn up within the (short) test wait
         "machine": "peer-b",
     }
     # peer-b started it, in its own folder for the session; nothing opened a terminal.
     started = [call for call in env.bin.calls("claude") if "--resume" in call.argv]
     assert len(started) == 1
-    assert started[0].argv[:3] == ["--bg", "--resume", HANDMADE]
+    assert started[0].argv == ["--bg", "--resume", HANDMADE, "--remote-control"]
     assert started[0].cwd == str(machines.peer_b_cwd)
     assert env.bin.calls("xterm") == []
     # The forwarded request: peer-b's token, no Origin (a bearer request needs none).
@@ -473,6 +476,7 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
     assert response.json() == {
         "ok": False,
         "reason": "peer-b: folder no longer exists: /nonexistent/gone",
+        "restartable": False,
     }
     response = laptop.post(f"/peers/peer-b/sessions/{C_SESSION}/resume")
     assert response.status_code == 404 and response.json()["reason"].startswith("peer-b: ")
@@ -500,6 +504,45 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
     response = laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/resume")
     assert response.status_code == 502
     assert response.json()["reason"] == "peer-b: unreachable: connection refused"
+
+
+def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    answer: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(answer.pop("status", 200), json=answer)
+
+    network = Network(hosts={PEER_B_HOST: handle})
+    answer.update(ok=True, attach="claude attach x", opened_terminal=False, remote_url=link)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded == {
+        "ok": True,
+        "attach": "claude attach x",
+        "opened_terminal": False,
+        "remote_url": link,
+        "pending": False,
+        "machine": "peer-b",
+    }
+    # A link that is not a Claude link is dropped: it ends up in the user's browser.
+    answer.update(ok=True, attach="claude attach x", remote_url="https://evil.example/x")
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded["remote_url"] is None
+    answer.update(ok=True, attach="claude attach x", remote_url=None, pending=True)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded["pending"] is True
+    # A refusal that offers a restart says so.
+    answer.update(status=409, ok=False, reason="running without Remote Control", restartable=True)
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert (refused.value.status, refused.value.restartable) == (409, True)
+    assert refused.value.reason == "peer-b: running without Remote Control"
+    answer.update(status=409, ok=False, reason="folder gone")
+    answer.pop("restartable")
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert refused.value.restartable is False
 
 
 def test_resume_forward_refused_by_peer(machines: Machines, tmp_path: Path) -> None:
