@@ -1,0 +1,25 @@
+#!/usr/bin/openrc-run
+# vigil as an OpenRC user service (OpenRC 0.60 or newer, which supports user services).
+#
+# Install:
+#   mkdir -p ~/.config/rc/init.d
+#   install -m 755 contrib/openrc/vigil ~/.config/rc/init.d/vigil
+#   rc-service --user vigil start
+#   rc-update --user add vigil default
+#
+# Settings (optional): set them in ~/.config/rc/conf.d/vigil, for example
+#   vigil_bin="/usr/local/bin/vigil"
+#   vigil_args="--port 7800"
+
+description="vigil: index and resume Claude Code sessions"
+
+: "${vigil_bin:=${HOME}/.local/bin/vigil}"
+: "${vigil_args:=}"
+
+supervisor="supervise-daemon"
+command="${vigil_bin}"
+command_args="serve ${vigil_args}"
+
+# A user service does not inherit the login shell's PATH. vigil needs `claude` (and `tmux`,
+# for the fallback launcher) on PATH to resume sessions.
+export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"

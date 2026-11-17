@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=vigil
+Comment=Index and resume Claude Code sessions
+Exec=vigil serve
+Terminal=false
+X-GNOME-Autostart-enabled=true
