@@ -1,0 +1,25 @@
+# vigil as a systemd user unit.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/vigil.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil.service
+#
+# To change the port, run `systemctl --user edit vigil.service` and override ExecStart
+# (clear it first with an empty `ExecStart=` line), or set `port` in the config file.
+[Unit]
+Description=vigil: index and resume Claude Code sessions
+Documentation=https://github.com/SDNick484/vigil
+
+[Service]
+Type=simple
+# pipx installs to ~/.local/bin; change this if vigil lives elsewhere.
+ExecStart=%h/.local/bin/vigil serve
+# vigil needs `claude` (and `tmux`, for the fallback launcher) on PATH to resume sessions.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
