@@ -1,5 +1,9 @@
 """The HTML pages (`router`): the sessions list, the session detail page and the static files.
 
+With peers configured (v2, `vigil.peers`), the sessions list merges in the peers' sessions with a
+machine column, filtered here as the index filters this machine's own, and a peer's session has a
+detail page under `/peers/{name}/sessions/{id}` built from what the peer last sent.
+
 Pages are server-rendered Jinja2 templates over the same queries the JSON API uses; htmx (vendored
 in `static/`) only adds the live search filter and the inline results of Resume and metadata
 edits. Viewing works without JavaScript. The state-changing POSTs are the ones in `vigil.web.api`.
@@ -9,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -16,6 +21,13 @@ from fastapi.templating import Jinja2Templates
 
 from vigil.commands import resume_command
 from vigil.index.queries import SessionRow, chain, get_session, list_projects, list_sessions
+from vigil.peers import (
+    PeerSession,
+    filter_sessions,
+    local_machine,
+    newest_first,
+    with_machine,
+)
 from vigil.serialize import apply_status, display_name
 from vigil.usage import build_report, refresh_sources
 from vigil.web import connection, state
@@ -43,10 +55,31 @@ def _preview(text: str | None) -> str:
     return first if len(first) <= PREVIEW_CHARS else first[: PREVIEW_CHARS - 1] + "…"
 
 
+def peer_of(row: SessionRow) -> str | None:
+    """The peer a session is on, or None for this machine's own."""
+    return row.peer if isinstance(row, PeerSession) else None
+
+
+def session_url(row: SessionRow, session_id: str | None = None) -> str:
+    """The detail page of `row` (or of `session_id` on the same machine)."""
+    ident = quote(session_id or row.session_id, safe="")
+    peer = peer_of(row)
+    return f"/peers/{quote(peer, safe='')}/sessions/{ident}" if peer else f"/sessions/{ident}"
+
+
+def resume_url(row: SessionRow) -> str:
+    """Where Resume on `row` posts: this machine's resume action, or the one forwarding to its
+    peer."""
+    return session_url(row) + "/resume"
+
+
 templates = Jinja2Templates(directory=WEB_DIR / "templates")
 templates.env.filters["when"] = _when
 templates.env.globals["session_name"] = display_name
 templates.env.globals["preview"] = _preview
+templates.env.globals["peer_of"] = peer_of
+templates.env.globals["session_url"] = session_url
+templates.env.globals["resume_url"] = resume_url
 
 
 @dataclass(frozen=True)
@@ -92,14 +125,31 @@ def sessions_page(
             collapse_chains=not all_,
             limit=LIST_LIMIT,
         )
-    caps, live = state(request).live.get()
+    web = state(request)
+    caps, live = web.live.get()
     rows = apply_status(rows, caps, live)
+    offline: list[tuple[str, datetime | None, str]] = []
+    if web.config.peers:
+        merged = with_machine(rows, local_machine(web.config))
+        for name, result in web.peers.results().items():
+            merged += filter_sessions(
+                result.sessions,
+                query=q or None,
+                project_key=project or None,
+                include_archived=all_,
+                collapse_chains=not all_,
+            )
+            if result.error is not None:
+                offline.append((name, result.fetched_at, result.error))
+        rows = newest_first(merged)[:LIST_LIMIT]
     context = {
         "groups": group_by_project(rows),
         "count": len(rows),
         "q": q,
         "project": project,
         "all": all_,
+        "machines": bool(web.config.peers),
+        "offline": offline,
     }
     if request.headers.get("hx-request") == "true":
         # Just the results block, to swap into the page without reloading it.
@@ -118,12 +168,37 @@ def session_page(request: Request, session_id: str) -> Any:
         links = chain(conn, row.chain_id) if row is not None else []
     if row is None:
         return _render(request, "session_detail.html", {"row": None, "ident": session_id}, 404)
-    caps, live = state(request).live.get()
+    web = state(request)
+    caps, live = web.live.get()
     row, *links = apply_status([row, *links], caps, live)
     context = {
         "row": row,
         "chain": links if len(links) > 1 else [],
         "command": resume_command(row),
+        "machine": local_machine(web.config),
+    }
+    return _render(request, "session_detail.html", context)
+
+
+@router.get("/peers/{peer}/sessions/{session_id}", response_class=HTMLResponse)
+def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
+    """A peer's session as the peer last sent it: what it holds, the command that resumes it by
+    hand on that machine, and Resume (forwarded to the peer). Label and note are edited on the
+    peer itself."""
+    hub = state(request).peers
+    result = hub.results().get(peer) if hub.peer(peer) is not None else None
+    row = None
+    if result is not None:
+        row = next((s for s in result.sessions if s.session_id == session_id), None)
+    if result is None or row is None:
+        context: dict[str, Any] = {"row": None, "ident": session_id}
+        return _render(request, "session_detail.html", context, 404)
+    context = {
+        "row": row,
+        "chain": [],
+        "command": resume_command(row),
+        "machine": peer,
+        "result": result,
     }
     return _render(request, "session_detail.html", context)
 

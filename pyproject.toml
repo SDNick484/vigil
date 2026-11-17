@@ -21,6 +21,7 @@ dependencies = [
     "jinja2",
     "watchfiles",
     "python-multipart",
+    "httpx",
 ]
 
 [project.optional-dependencies]

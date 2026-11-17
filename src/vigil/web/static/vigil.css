@@ -72,6 +72,8 @@ th { font-size: 0.8rem; text-transform: uppercase; color: var(--muted); }
 td.actions { white-space: nowrap; }
 td.actions form { display: inline; }
 tr.archived { opacity: 0.6; }
+tr.stale { opacity: 0.6; }
+.badge.stale { color: var(--bad); border-color: var(--bad); }
 .note { color: var(--muted); font-size: 0.875rem; }
 .badge, .status {
   font-size: 0.75rem;

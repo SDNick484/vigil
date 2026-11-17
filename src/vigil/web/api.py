@@ -29,6 +29,7 @@ from vigil.index.queries import (
     list_sessions,
     set_meta,
 )
+from vigil.peers import ResumeForwardError
 from vigil.resume import ResumeRefused, execute, plan_resume
 from vigil.serialize import apply_status, session_to_dict
 from vigil.usage import build_report, catalog_entry_to_dict, refresh_sources, report_to_dict
@@ -132,6 +133,24 @@ class RefusalOut(BaseModel):
     reason: str
 
 
+class ForwardedResumeOut(ResumeOut):
+    """A resume forwarded to a peer: `attach` is to be run on `machine`."""
+
+    machine: str
+
+
+class PeerOut(BaseModel):
+    """A configured peer (v2) and how its last fetch went: `stale` when it could not be reached
+    (then `error` says why, and `fetched_at` is when its last-known sessions were fetched)."""
+
+    name: str
+    url: str
+    fetched_at: str | None
+    stale: bool
+    error: str | None
+    session_count: int
+
+
 def _with_status(request: Request, rows: list[SessionRow]) -> list[SessionRow]:
     caps, live = state(request).live.get()
     return apply_status(rows, caps, live)
@@ -233,6 +252,25 @@ def catalog(request: Request) -> list[dict[str, object]]:
     return [catalog_entry_to_dict(entry) for entry in entries]
 
 
+@router.get("/peers", response_model=list[PeerOut])
+def peers(request: Request) -> list[dict[str, object]]:
+    """The configured peers, each asked for its sessions unless asked moments ago. Their sessions
+    are not part of `/api/v1/sessions`, which lists this machine's only (it is what peers read)."""
+    hub = state(request).peers
+    results = hub.results()
+    return [
+        {
+            "name": peer.name,
+            "url": peer.url,
+            "fetched_at": to_db(results[peer.name].fetched_at),
+            "stale": results[peer.name].stale,
+            "error": results[peer.name].error,
+            "session_count": len(results[peer.name].sessions),
+        }
+        for peer in hub.peers
+    ]
+
+
 @router.get("/health", response_model=HealthOut)
 def health(request: Request) -> dict[str, object]:
     """Whether the service is up, what it runs, and how much it has indexed."""
@@ -278,6 +316,25 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
             return _refusal(409, refused.reason)
     web.live.clear()
     return {"ok": True, "attach": attach, "opened_terminal": plan.terminal is not None}
+
+
+@actions.post(
+    "/peers/{peer}/sessions/{session_id}/resume",
+    response_model=ForwardedResumeOut,
+    responses={404: {"model": RefusalOut}, 409: {"model": RefusalOut}, 502: {"model": RefusalOut}},
+)
+def resume_on_peer(
+    request: Request, peer: str, session_id: str
+) -> dict[str, object] | JSONResponse:
+    """Resume a session of the peer called `peer`: forwarded to that peer's own resume action
+    with its token (`vigil.peers.forward_resume`). The peer starts it and, since the request
+    comes from another machine, answers with the attach command to run there. The peer's 404
+    and 409 refusals come back as they are; 502 when it cannot be reached or refuses the
+    request."""
+    try:
+        return state(request).peers.resume(peer, session_id)
+    except ResumeForwardError as refused:
+        return _refusal(refused.status, refused.reason)
 
 
 _META_FIELDS = ("label", "note", "pinned", "archived")
