@@ -1,0 +1,312 @@
+"""Remote access (v2): the access token, the browser session cookie, and the login page (`router`).
+
+Remote access is on only when `server.token_file` is set. Then:
+
+- API clients send the token in every request: `Authorization: Bearer <token>`.
+- Browsers post the token once to `/login` and get a session cookie (`vigil_session`): HttpOnly,
+  SameSite=Strict, Path=/, Secure when the page was loaded over HTTPS, valid for 30 days. Its value
+  is an expiry time and an HMAC-SHA256 over that time and a digest of the token, keyed with a
+  random key kept in the data dir (`session.key`, created 0600). Changing the token or deleting
+  the key logs every browser out.
+
+Who needs to authenticate, and how a request is checked, is decided in `vigil.web.security`; this
+module only provides the pieces. Tokens and cookies are compared in constant time
+(`hmac.compare_digest`).
+"""
+
+import base64
+import hashlib
+import hmac
+import ipaddress
+import os
+import secrets
+import stat
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+
+from vigil.config import ServerConfig
+from vigil.web.pages import templates
+
+SESSION_COOKIE = "vigil_session"
+SESSION_MAX_AGE = 30 * 24 * 3600
+"""How long (seconds) a login lasts."""
+
+SIGNING_KEY_FILE = "session.key"
+"""The cookie signing key's file name, in the data dir."""
+
+KEY_BYTES = 32
+
+MIN_TOKEN_LENGTH = 32
+MAX_TOKEN_LENGTH = 4096
+
+_COOKIE_CONTEXT = b"vigil-session-v1"
+
+
+class AuthError(Exception):
+    """The token file or the signing key cannot be used; the message says why and what to do."""
+
+
+def _check_private(info: os.stat_result, path: Path, what: str) -> None:
+    """Refuse a file that is not a regular file of ours, readable by nobody else."""
+    if not stat.S_ISREG(info.st_mode):
+        raise AuthError(f"{what} {path} is not a regular file")
+    if info.st_uid != os.geteuid():
+        raise AuthError(f"{what} {path} is not owned by the user running vigil")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o077:
+        raise AuthError(f"{what} {path} has mode {mode:04o}; it must be 0600 (chmod 600 {path})")
+
+
+def _read_private(path: Path, what: str, flags: int, limit: int) -> bytes:
+    """Up to `limit` bytes of `path`, after `_check_private` passes on the open file (so the file
+    checked is the file read). O_NONBLOCK: opening a FIFO must not hang; it is then refused as
+    not a regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | flags)
+    except OSError as error:
+        raise AuthError(f"cannot read {what} {path}: {error.strerror or error}") from error
+    try:
+        _check_private(os.fstat(fd), path, what)
+        data = b""
+        while len(data) < limit and (chunk := os.read(fd, limit - len(data))):
+            data += chunk
+        return data
+    except OSError as error:
+        raise AuthError(f"cannot read {what} {path}: {error.strerror or error}") from error
+    finally:
+        os.close(fd)
+
+
+def load_token(path: Path) -> str:
+    """The access token in `path`: the file's text without surrounding whitespace.
+
+    Raises AuthError unless the file exists, is a regular file owned by the current user with no
+    group or other permissions (0600, or 0400), and holds 32 to 4096 printable ASCII characters
+    without spaces.
+    """
+    data = _read_private(path, "token file", 0, MAX_TOKEN_LENGTH + 2)
+    try:
+        token = data.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise AuthError(f"token file {path} must hold printable ASCII only") from None
+    if not token.isprintable() or any(char.isspace() for char in token):
+        raise AuthError(f"token file {path} must hold one token: printable ASCII without spaces")
+    if not MIN_TOKEN_LENGTH <= len(token) <= MAX_TOKEN_LENGTH:
+        raise AuthError(
+            f"token file {path} must hold {MIN_TOKEN_LENGTH} to {MAX_TOKEN_LENGTH} characters; "
+            "make one with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+    return token
+
+
+def _create_key(path: Path) -> None:
+    """Write a new random key to `path` (0600) unless a key is already there. The key is written
+    to a temporary file and linked into place, so no reader ever sees a half-written key."""
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(secrets.token_bytes(KEY_BYTES))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            pass  # another vigil made one meanwhile; use that
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_signing_key(path: Path) -> bytes:
+    """The cookie signing key in `path`, created (mode 0600, in a 0700 folder) when missing.
+
+    Raises AuthError when the key file is not a private regular file of the current user or is
+    shorter than 32 bytes, or cannot be created.
+    """
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not path.exists() and not path.is_symlink():
+            _create_key(path)
+    except OSError as error:
+        raise AuthError(f"cannot create signing key {path}: {error.strerror or error}") from error
+    key = _read_private(path, "signing key", os.O_NOFOLLOW, 1024)
+    if len(key) < KEY_BYTES:
+        raise AuthError(f"signing key {path} is too short; delete it and vigil makes a new one")
+    return key
+
+
+def _digest(text: str) -> bytes:
+    return hashlib.sha256(text.encode("utf-8", "replace")).digest()
+
+
+def token_matches(given: str, expected: str) -> bool:
+    """Whether `given` is the token, compared in constant time. Both are hashed first, so the
+    comparison does not reveal the token's length either."""
+    return hmac.compare_digest(_digest(given), _digest(expected))
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+@dataclass(frozen=True)
+class AuthSettings:
+    """What the guard needs to check remote requests. Built by `load_auth`."""
+
+    token: str = field(repr=False)
+    signing_key: bytes = field(repr=False)
+    allowed_hosts: frozenset[str] = frozenset()
+    """Host names (as `security.host_name` gives them) remote requests may use, besides the
+    loopback names."""
+    max_age: int = SESSION_MAX_AGE
+
+    def bearer_ok(self, authorization: str) -> bool:
+        """Whether an `Authorization` header value is `Bearer <the token>`."""
+        scheme, _, credentials = authorization.strip().partition(" ")
+        return scheme.lower() == "bearer" and token_matches(credentials.strip(), self.token)
+
+    def _mac(self, expires: int) -> str:
+        # The token's digest is part of the signed text, so a new token voids old cookies.
+        message = b"|".join((_COOKIE_CONTEXT, str(expires).encode(), _digest(self.token)))
+        return _b64(hmac.new(self.signing_key, message, hashlib.sha256).digest())
+
+    def issue_cookie(self, now: float) -> str:
+        """A session cookie value that is valid for `max_age` seconds from `now`."""
+        expires = int(now) + self.max_age
+        return f"{expires}.{self._mac(expires)}"
+
+    def cookie_ok(self, value: str | None, now: float) -> bool:
+        """Whether `value` is a session cookie this service issued and that has not expired."""
+        if not value:
+            return False
+        expires_text, _, mac = value.partition(".")
+        if not (expires_text.isascii() and expires_text.isdigit() and len(expires_text) <= 12):
+            return False
+        expires = int(expires_text)
+        if not now < expires <= now + self.max_age + 60:
+            return False
+        return hmac.compare_digest(mac.encode("utf-8", "replace"), self._mac(expires).encode())
+
+
+def _bind_host(bind: str) -> str | None:
+    """The bind address as a `Host` name, when it is one clients can use (not a wildcard and not
+    loopback, whose names are always allowed)."""
+    try:
+        address = ipaddress.ip_address(bind)
+    except ValueError:
+        return None
+    if address.is_unspecified or address.is_loopback:
+        return None
+    return f"[{address}]" if address.version == 6 else str(address)
+
+
+def load_auth(server: ServerConfig, data_dir: Path) -> AuthSettings | None:
+    """The settings for remote access, or None when `server.token_file` is not set (loopback
+    only, as in v1). Reads the token and the signing key (creating the key in `data_dir`);
+    raises AuthError when either cannot be used. The bind address, unless it is a wildcard, is
+    an allowed host too."""
+    if server.token_file is None:
+        return None
+    hosts = set(server.allowed_hosts)
+    bind = _bind_host(server.bind)
+    if bind is not None:
+        hosts.add(bind)
+    return AuthSettings(
+        token=load_token(server.token_file),
+        signing_key=load_signing_key(data_dir / SIGNING_KEY_FILE),
+        allowed_hosts=frozenset(hosts),
+    )
+
+
+def is_https(scheme: str, headers: Mapping[str, str]) -> bool:
+    """Whether the browser reached the service over HTTPS: directly, or through a TLS proxy that
+    says so in `X-Forwarded-Proto`. Only used to mark the cookie Secure."""
+    forwarded = headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return scheme in ("https", "wss") or forwarded == "https"
+
+
+def safe_next(value: object) -> str:
+    """Where to go after logging in: a path on this service, else `/`. Never another site."""
+    if (
+        isinstance(value, str)
+        and value.startswith("/")
+        and not value.startswith("//")
+        and "\\" not in value
+        and value.isprintable()
+        and len(value) <= 2048
+    ):
+        return value
+    return "/"
+
+
+router = APIRouter(tags=["auth"])
+
+
+def settings(request: Request) -> AuthSettings | None:
+    """The remote access settings of the app handling `request`; None when remote access is off."""
+    return getattr(request.app.state, "vigil_auth", None)
+
+
+def _off() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "remote access is not enabled (server.token_file is not set)"}, status_code=404
+    )
+
+
+def _login_page(request: Request, next_path: str, error: str | None, status: int) -> Any:
+    context = {"next": next_path, "error": error}
+    return templates.TemplateResponse(request, "login.html", context, status_code=status)
+
+
+@router.get("/login")
+def login_page(request: Request, next_path: Annotated[str, Query(alias="next")] = "/") -> Response:
+    """The login form: one field, the token."""
+    if settings(request) is None:
+        return _off()
+    response: Response = _login_page(request, safe_next(next_path), None, 200)
+    return response
+
+
+@router.post("/login")
+async def login(request: Request) -> Response:
+    """Check the posted `token`; on success set the session cookie and go to `next`."""
+    auth = settings(request)
+    if auth is None:
+        return _off()
+    form = await request.form()
+    token, next_path = form.get("token"), safe_next(form.get("next"))
+    if not isinstance(token, str) or not token_matches(token.strip(), auth.token):
+        response: Response = _login_page(request, next_path, "That is not the token.", 401)
+        return response
+    response = RedirectResponse(next_path, status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        auth.issue_cookie(time.time()),
+        max_age=auth.max_age,
+        path="/",
+        secure=is_https(request.url.scheme, request.headers),
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
+@router.post("/logout")
+def logout(request: Request) -> Response:
+    """Forget the session cookie and go to the login page."""
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        secure=is_https(request.url.scheme, request.headers),
+        httponly=True,
+        samesite="strict",
+    )
+    return response

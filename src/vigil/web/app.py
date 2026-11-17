@@ -13,8 +13,8 @@ import vigil
 from vigil.config import Config
 from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
-from vigil.paths import index_path
-from vigil.web import WebState, api, pages, watcher
+from vigil.paths import data_dir, index_path
+from vigil.web import WebState, api, auth, pages, watcher
 from vigil.web.security import LoopbackGuard
 
 # Append point: include a router by appending one line.
@@ -22,6 +22,7 @@ ROUTERS: list[APIRouter] = [
     api.router,
     api.actions,
     pages.router,
+    auth.router,
 ]
 
 
@@ -36,8 +37,11 @@ def create_app(
     `conn_factory` opens an index connection (default: the index in the data dir); handlers open
     one per request and close it. With `start_watcher`, the app scans the transcripts under
     `config.claude_home` on startup and keeps the index current while it runs (`watcher.run`).
-    Every request passes `LoopbackGuard` first.
+    Every request passes `LoopbackGuard` first. With `config.server.token_file` set, remote
+    access is on: the token is read and the cookie signing key loaded (or created) in the data
+    dir now, and AuthError is raised when either cannot be used (`vigil.web.auth.load_auth`).
     """
+    remote = auth.load_auth(config.server, data_dir())
     factory = conn_factory or functools.partial(connect, index_path())
     web = WebState(config=config, conn_factory=factory)
 
@@ -64,7 +68,8 @@ def create_app(
 
     app = FastAPI(title="vigil", version=vigil.__version__, lifespan=lifespan)
     app.state.vigil = web
+    app.state.vigil_auth = remote
     for router in ROUTERS:
         app.include_router(router)
-    app.add_middleware(LoopbackGuard)
+    app.add_middleware(LoopbackGuard, auth=remote)
     return app
