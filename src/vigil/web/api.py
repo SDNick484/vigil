@@ -70,6 +70,8 @@ class SessionOut(BaseModel):
     project_label: str
     transcript_path: str
     status: Status
+    remote_url: str | None
+    remote_url_at: str | None
 
 
 class SessionDetailOut(SessionOut):

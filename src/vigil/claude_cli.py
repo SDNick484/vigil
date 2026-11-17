@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 _CAPS_TIMEOUT = 10.0
@@ -34,6 +35,11 @@ class LiveSession:
     kind: Literal["background", "interactive"]
     name: str | None
     cwd: str | None
+    busy: bool = False
+    """The session is working on something now (`status` is `busy`; the other value seen is
+    `idle`)."""
+    started_at: datetime | None = None
+    """When this run of the session started (`startedAt`, epoch milliseconds)."""
 
 
 _NONE = Capabilities(version=None, has_bg=False, has_attach=False, has_agents_json=False)
@@ -99,6 +105,15 @@ def capabilities(claude: str = "claude") -> Capabilities:
     return caps
 
 
+def _started_at(value: Any) -> datetime | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    except OverflowError, OSError, ValueError:
+        return None
+
+
 def _parse_entry(entry: Any) -> LiveSession | None:
     if not isinstance(entry, dict):
         return None
@@ -116,6 +131,8 @@ def _parse_entry(entry: Any) -> LiveSession | None:
         kind=kind,
         name=name if isinstance(name, str) and name else None,
         cwd=cwd if isinstance(cwd, str) and cwd else None,
+        busy=entry.get("status") == "busy",
+        started_at=_started_at(entry.get("startedAt")),
     )
 
 

@@ -31,6 +31,9 @@ What is read, as found in real Claude Code 2.1.312 transcripts (see tests/fixtur
 - `last_assistant`: the latest non-empty `text` block of an assistant record.
 - Text fields (`title`, `first_prompt`, `last_user`, `last_assistant`) are cut to `TRUNCATE`
   characters.
+- `remote_url` / `remote_url_at`: the `url` and `timestamp` of the newest `system` record whose
+  `subtype` is `bridge_status` (written when `/remote-control` is active), when the URL is a
+  `https://claude.ai/code/...` link (`REMOTE_URL`). System records are not messages.
 - `previous_session_id`: 2.1.312 records carry no reference to a previous session. `claude -p
   --resume <id>` appends to the same file; `--fork-session` writes a new file that copies the
   earlier messages (same `uuid`s, new `sessionId`) without naming the source session. So this is
@@ -71,6 +74,9 @@ _BASH_INPUT = re.compile(r"<bash-input>(.*?)</bash-input>", re.DOTALL)
 _COMMAND_OUTPUT = re.compile(r"\s*<(?:local-command|bash)-(?:stdout|stderr)>")
 _SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
 
+REMOTE_URL = re.compile(r"https://claude\.ai/code/[A-Za-z0-9_-]{1,128}")
+"""A Claude Remote Control link; only a `fullmatch` is kept."""
+
 
 @dataclass
 class SessionFacts:
@@ -88,6 +94,8 @@ class SessionFacts:
     models: set[str] = field(default_factory=set)
     features: Counter[tuple[FeatureKind, str]] = field(default_factory=Counter)
     previous_session_id: str | None = None
+    remote_url: str | None = None
+    remote_url_at: datetime | None = None
 
 
 @dataclass
@@ -148,6 +156,10 @@ def _apply(facts: SessionFacts, record: dict[str, Any], stem: str) -> None:
         if title:
             facts.title = _clip(title)
         return
+    if kind == "system":
+        if record.get("subtype") == "bridge_status":
+            _apply_bridge_status(facts, record, at)
+        return
     if kind not in ("user", "assistant"):
         return
     if record.get("isSidechain") is True or record.get("isMeta") is True:
@@ -160,6 +172,41 @@ def _apply(facts: SessionFacts, record: dict[str, Any], stem: str) -> None:
     else:
         model = _str(message.get("model")) if isinstance(message, dict) else None
         _apply_assistant(facts, model, content)
+
+
+def _bridge_url(record: dict[str, Any]) -> str | None:
+    url = _str(record.get("url"))
+    return url if url is not None and REMOTE_URL.fullmatch(url) else None
+
+
+def _apply_bridge_status(facts: SessionFacts, record: dict[str, Any], at: datetime | None) -> None:
+    # Without a time there is no telling which link is newer.
+    url = _bridge_url(record)
+    if url is None or at is None:
+        return
+    if facts.remote_url_at is None or at >= facts.remote_url_at:
+        facts.remote_url = url
+        facts.remote_url_at = at
+
+
+def find_remote_url(path: Path, after: datetime) -> str | None:
+    """The URL of the newest valid `bridge_status` record in `path` written strictly after
+    `after`, else None. Reads the whole file."""
+    newest: tuple[datetime, str] | None = None
+    data = path.read_bytes()
+    for line in data.split(b"\n"):
+        record = _decode(line)
+        if record is None or record.get("type") != "system":
+            continue
+        if record.get("subtype") != "bridge_status":
+            continue
+        url = _bridge_url(record)
+        at = _timestamp(record.get("timestamp"))
+        if url is None or at is None or at <= after:
+            continue
+        if newest is None or at >= newest[0]:
+            newest = (at, url)
+    return newest[1] if newest is not None else None
 
 
 def _apply_user(facts: SessionFacts, record: dict[str, Any], content: Any) -> None:

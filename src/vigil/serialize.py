@@ -25,6 +25,8 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
     - `previous_id` is the session this one continued, if known; `chain_id` groups a resume chain.
     - `name` is `label` if set, else `title`, else null (`first_prompt` is a separate field).
     - `started_at` and `last_activity_at` are ISO 8601 strings in UTC (or null).
+    - `remote_url` is the session's Claude Remote Control link (or null) and `remote_url_at` when
+      it was written, an ISO 8601 string in UTC.
     - `models` is a sorted list; `status` is `running`, `background`, `idle` or `unknown`.
     """
     return {
@@ -53,6 +55,8 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
         "project_label": row.project_label,
         "transcript_path": row.transcript_path,
         "status": row.status,
+        "remote_url": row.remote_url,
+        "remote_url_at": to_db(row.remote_url_at),
     }
 
 
@@ -76,3 +80,17 @@ def apply_status(
         )
         result.append(replace(row, status=status))
     return result
+
+
+def open_link(row: SessionRow, live: dict[str, LiveSession]) -> str | None:
+    """The Remote Control link to send a phone to: `row.remote_url` when the session is live and
+    the link was written at or after the live run started (an older link belongs to an earlier
+    run, which is over), else None. Without a start time any link counts."""
+    running = live.get(row.session_id)
+    if running is None or row.remote_url is None:
+        return None
+    if running.started_at is not None and (
+        row.remote_url_at is None or row.remote_url_at < running.started_at
+    ):
+        return None
+    return row.remote_url

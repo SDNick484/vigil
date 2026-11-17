@@ -97,15 +97,22 @@ from vigil.index.scanner import scan  # noqa: E402
 FIXTURE_TRANSCRIPTS = Path(__file__).parent / "fixtures" / "transcripts"
 FIXTURE_PROJECT_DIR = "-home-user-src-fixture-repo"
 HANDMADE_PROJECT_DIR = "-home-user-src-broken-repo"
+SKIP_REMOTE_FIXTURE = shutil.ignore_patterns("remote-control.jsonl")
+"""For copying the hand-made transcripts: the Remote Control one is only for tests that name it."""
 
 
 def install_fixture_transcripts(claude_home: Path) -> Path:
     """Copy the fixture transcripts into `claude_home/projects/` in Claude Code's layout (the
-    real ones, with their subagent folder, in one project folder; the hand-made one in another).
+    real ones, with their subagent folder, in one project folder; the hand-made one in another;
+    `remote-control.jsonl` is left out, tests that need it copy it themselves).
     Returns the `projects` folder."""
     projects = claude_home / "projects"
     shutil.copytree(FIXTURE_TRANSCRIPTS / "2.1.312", projects / FIXTURE_PROJECT_DIR)
-    shutil.copytree(FIXTURE_TRANSCRIPTS / "handmade", projects / HANDMADE_PROJECT_DIR)
+    shutil.copytree(
+        FIXTURE_TRANSCRIPTS / "handmade",
+        projects / HANDMADE_PROJECT_DIR,
+        ignore=SKIP_REMOTE_FIXTURE,
+    )
     return projects
 
 

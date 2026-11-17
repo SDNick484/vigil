@@ -45,6 +45,8 @@ class SessionRow:
     note: str | None = None
     models: tuple[str, ...] = ()
     status: Status = "unknown"
+    remote_url: str | None = None
+    remote_url_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,8 @@ def _row(row: sqlite3.Row) -> SessionRow:
         archived=bool(row["archived"]),
         note=row["note"],
         models=tuple(sorted(models.split(_SEP))) if models else (),
+        remote_url=row["remote_url"],
+        remote_url_at=from_db(row["remote_url_at"]),
     )
 
 

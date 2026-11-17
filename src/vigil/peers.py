@@ -44,6 +44,7 @@ from vigil.index.db import from_db, to_db
 from vigil.index.queries import SessionRow, Status
 from vigil.paths import data_dir
 from vigil.serialize import session_to_dict
+from vigil.transcript import REMOTE_URL
 
 PEER_TIMEOUT = 3.0
 """Seconds a sessions fetch may spend connecting, and waiting for each read; the whole answer
@@ -228,6 +229,9 @@ def session_from_dict(
     count = data.get("message_count")
     models = data.get("models")
     status = data.get("status")
+    remote_url = data.get("remote_url")
+    if not isinstance(remote_url, str) or not REMOTE_URL.fullmatch(remote_url):
+        remote_url = None
     snippets = {key: _text(data, key, TEXT_LIMIT) for key in _SNIPPETS}
     return PeerSession(
         session_id=session_id,
@@ -255,6 +259,8 @@ def session_from_dict(
         if isinstance(models, list)
         else (),
         status=cast(Status, status) if status in _STATUSES and not stale else "unknown",
+        remote_url=remote_url,
+        remote_url_at=_time(data, "remote_url_at") if remote_url else None,
         peer=peer,
         stale=stale,
     )

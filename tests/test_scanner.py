@@ -1,6 +1,8 @@
 import json
+import shutil
 import sqlite3
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from tests.conftest import (
 )
 from vigil.index import scanner
 from vigil.index.db import connect
+from vigil.index.queries import get_session
 from vigil.index.scanner import ScanStats, scan
 from vigil.transcript import ParseResult, SessionFacts, parse_transcript
 
@@ -24,6 +27,7 @@ NAMED = "e47d2def-0bb3-4d50-9f9c-8e38e4cdcfba"
 COMMAND = "c8232e85-1b73-42a7-b6af-192de6b33a26"
 MCP_AGENT = "7bf4d32d-3526-48a2-9532-46c8ec375e87"
 HANDMADE = "11111111-1111-4111-8111-111111111111"
+REMOTE = "22222222-2222-4222-8222-222222222222"
 REAL_IDS = sorted(p.stem for p in (FIXTURE_TRANSCRIPTS / "2.1.312").glob("*.jsonl"))
 
 
@@ -366,3 +370,23 @@ def test_concurrent_scanners_do_not_count_twice(
         other.close()
     assert stats.sessions_updated == 0
     assert dump(conn, PLAIN)["message_count"] == before + 1
+
+
+def test_remote_url_stored_and_listed(home: Path, conn: sqlite3.Connection) -> None:
+    shutil.copy(
+        FIXTURE_TRANSCRIPTS / "handmade" / "remote-control.jsonl",
+        home / "projects" / HANDMADE_PROJECT_DIR / "remote-control.jsonl",
+    )
+    scan(conn, home)
+    row = get_session(conn, REMOTE)
+    assert row is not None
+    assert row.remote_url == "https://claude.ai/code/session_PLACEHOLDER02"
+    assert row.remote_url_at == datetime(2026, 11, 17, 11, 5, tzinfo=UTC)
+    assert get_session(conn, PLAIN).remote_url is None  # type: ignore[union-attr]
+    # An incremental scan keeps it.
+    path = home / "projects" / HANDMADE_PROJECT_DIR / "remote-control.jsonl"
+    with path.open("a") as handle:
+        handle.write('{"type":"system","subtype":"other","timestamp":"2026-11-17T12:00:00.000Z"}\n')
+    scan(conn, home)
+    row = get_session(conn, REMOTE)
+    assert row is not None and row.remote_url == "https://claude.ai/code/session_PLACEHOLDER02"

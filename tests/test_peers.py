@@ -28,6 +28,7 @@ from tests.conftest import (
     FIXTURE_TRANSCRIPTS,
     HANDMADE_PROJECT_DIR,
     LOOPBACK_URL,
+    SKIP_REMOTE_FIXTURE,
     VigilEnv,
 )
 from vigil import peers
@@ -168,7 +169,11 @@ def machines(vigil_env: VigilEnv, tmp_path: Path) -> Iterator[Machines]:
 
     # peer-b: its own Claude home, index and token; remote access on.
     home_b = tmp_path / "peer_b_home"
-    shutil.copytree(FIXTURE_TRANSCRIPTS / "handmade", home_b / "projects" / HANDMADE_PROJECT_DIR)
+    shutil.copytree(
+        FIXTURE_TRANSCRIPTS / "handmade",
+        home_b / "projects" / HANDMADE_PROJECT_DIR,
+        ignore=SKIP_REMOTE_FIXTURE,
+    )
     index_b = tmp_path / "peer_b" / "index.db"
     cwd_b = tmp_path / "peer_b_work"
     cwd_b.mkdir()
@@ -698,3 +703,14 @@ def test_bad_peers_config_raises(tmp_path: Path, text: str, message: str) -> Non
 def test_create_app_without_peers_has_an_empty_hub(vigil_env: VigilEnv) -> None:
     app: FastAPI = create_app(Config(claude_home=vigil_env.claude_home), start_watcher=False)
     assert app.state.vigil.peers.peers == ()
+
+
+def test_peer_remote_url_validated() -> None:
+    good = "https://claude.ai/code/session_PLACEHOLDER01"
+    at = "2026-11-17T11:05:00.000000+00:00"
+    session = session_from_dict(canned_session(remote_url=good, remote_url_at=at), "peer-c")
+    assert session is not None
+    assert session.remote_url == good and session.remote_url_at is not None
+    for bad in ("https://evil.example/x", good + "/../x", good + "?a=1", 7, None):
+        session = session_from_dict(canned_session(remote_url=bad, remote_url_at=at), "peer-c")
+        assert session is not None and session.remote_url is None

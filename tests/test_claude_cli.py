@@ -3,6 +3,7 @@
 import json
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,8 @@ def test_live_sessions_parses_json(fake_bin: FakeBin) -> None:
             "interactive",
             "demo-session",
             "/home/user/projects/demo",
+            busy=True,
+            started_at=datetime(2026, 11, 17, 15, 7, 5, 568000, tzinfo=UTC),
         ),
         "bg-1": LiveSession("bg-1", "background", None, "/home/user/work"),
     }
@@ -132,3 +135,25 @@ def test_live_sessions_handles_timeout(fake_bin: FakeBin, monkeypatch: pytest.Mo
     script.chmod(0o755)
     monkeypatch.setattr(claude_cli, "_LIVE_TIMEOUT", 0.3)
     assert live_sessions(ALL_CAPS) == {}
+
+
+def test_live_session_busy_and_started(fake_bin: FakeBin) -> None:
+    entries = [
+        {
+            "pid": 1,
+            "cwd": "/home/user/work",
+            "kind": "interactive",
+            "startedAt": 1794938034841,
+            "sessionId": "busy-1",
+            "name": "x",
+            "status": "busy",
+        },
+        {"kind": "interactive", "sessionId": "idle-1", "status": "idle", "startedAt": "soon"},
+    ]
+    install_claude(fake_bin, version="2.1.312\n", help_text="", agents_json=json.dumps(entries))
+    live = live_sessions(ALL_CAPS)
+    assert live["busy-1"].busy is True
+    assert live["busy-1"].started_at == datetime.fromtimestamp(1794938034.841, tz=UTC)
+    assert live["busy-1"].started_at == datetime(2026, 11, 17, 17, 53, 54, 841000, tzinfo=UTC)
+    assert live["idle-1"].busy is False
+    assert live["idle-1"].started_at is None

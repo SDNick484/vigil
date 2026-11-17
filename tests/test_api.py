@@ -1,4 +1,6 @@
 import sqlite3
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -6,10 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import VigilEnv, freeze_tree
+from vigil.claude_cli import LiveSession
 from vigil.index.db import connect
-from vigil.index.queries import get_session, list_sessions
+from vigil.index.queries import SessionRow, get_session, list_sessions
 from vigil.index.scanner import link_chains
-from vigil.serialize import session_to_dict
+from vigil.serialize import open_link, session_to_dict
 from vigil.web.api import SessionOut
 
 NAMED = "e47d2def-0bb3-4d50-9f9c-8e38e4cdcfba"  # titled "fixture-named"
@@ -41,6 +44,14 @@ def stored(env: VigilEnv, session_id: str) -> dict[str, object]:
     conn.close()
     assert row is not None
     return session_to_dict(row)
+
+
+def row_of(env: VigilEnv, session_id: str) -> SessionRow:
+    conn = connect(env.index)
+    row = get_session(conn, session_id)
+    conn.close()
+    assert row is not None
+    return row
 
 
 def test_session_out_matches_session_to_dict(vigil_env: VigilEnv, web_client: TestClient) -> None:
@@ -328,3 +339,32 @@ def test_api_never_writes_under_the_claude_home(
     for path in ("/api/v1/sessions", f"/api/v1/sessions/{NAMED}", "/api/v1/projects"):
         assert web_client.get(path).status_code == 200
     assert web_client.post(f"/sessions/{NAMED}/meta", data={"label": "x"}).status_code == 200
+
+
+def test_session_has_remote_url(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        link, "2026-11-17T11:05:00.000000+00:00", NAMED)  # fmt: skip
+    detail = web_client.get(f"/api/v1/sessions/{NAMED}").json()
+    assert detail["remote_url"] == link
+    assert detail["remote_url_at"] == "2026-11-17T11:05:00.000000+00:00"
+    assert web_client.get(f"/api/v1/sessions/{PLAIN}").json()["remote_url"] is None
+
+
+def test_open_link_only_when_live_and_newer(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    at = datetime(2026, 11, 17, 11, 5, tzinfo=UTC)
+    row = replace(row_of(vigil_env, NAMED), remote_url=link, remote_url_at=at)
+
+    def live(started: datetime | None) -> dict[str, LiveSession]:
+        return {
+            NAMED: LiveSession(NAMED, "interactive", None, None, busy=False, started_at=started)
+        }
+
+    assert open_link(row, {}) is None  # idle: not live
+    assert open_link(row, live(at)) == link  # at or after the start
+    assert open_link(row, live(at - timedelta(minutes=1))) == link
+    assert open_link(row, live(None)) == link
+    assert open_link(row, live(at + timedelta(minutes=1))) is None  # from an earlier run
+    assert open_link(replace(row, remote_url=None), live(None)) is None
+    assert open_link(replace(row, remote_url_at=None), live(at)) is None
