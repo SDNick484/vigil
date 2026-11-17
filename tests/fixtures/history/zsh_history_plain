@@ -1,0 +1,4 @@
+ls
+claude --continue
+cat notes.txt
+claude update

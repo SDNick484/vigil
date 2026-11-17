@@ -1,0 +1,6 @@
+: 1700000000:0;ls -la
+: 1700000100:0;claude --model sonnet -n example-name
+: 1700000200:5;echo claude
+: 1700000300:0;claude doctor
+: 1700000400:0;claude -p "first line \
+second line" --effort high
