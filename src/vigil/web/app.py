@@ -14,13 +14,14 @@ from vigil.config import Config
 from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
 from vigil.paths import index_path
-from vigil.web import WebState, api, watcher
+from vigil.web import WebState, api, pages, watcher
 from vigil.web.security import LoopbackGuard
 
 # Append point: include a router by appending one line.
 ROUTERS: list[APIRouter] = [
     api.router,
     api.actions,
+    pages.router,
 ]
 
 

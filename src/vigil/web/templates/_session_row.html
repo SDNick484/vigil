@@ -1,0 +1,19 @@
+<tr class="session{% if s.archived %} archived{% endif %}" id="row-{{ s.session_id }}">
+  <td class="name">
+    <a href="/sessions/{{ s.session_id }}">{{ session_name(s) or preview(s.first_prompt) or s.session_id[:8] }}</a>
+    {% if s.pinned %}<span class="badge">pinned</span>{% endif %}
+    {% if s.archived %}<span class="badge">archived</span>{% endif %}
+    {% if s.note %}<div class="note">{{ s.note }}</div>{% endif %}
+  </td>
+  <td>{{ s.git_branch or "-" }}</td>
+  <td>{% if s.last_activity_at %}<time datetime="{{ s.last_activity_at.isoformat() }}">{{ s.last_activity_at|when }}</time>{% else %}-{% endif %}</td>
+  <td><span class="status status-{{ s.status }}">{{ s.status }}</span></td>
+  {# Machine column (v2 peers): add <td>{{ s.machine }}</td> here, matching the header in sessions.html. #}
+  <td class="actions">
+    <form method="post" action="/sessions/{{ s.session_id }}/resume"
+          hx-post="/sessions/{{ s.session_id }}/resume" hx-target="#resume-{{ s.session_id }}">
+      <button type="submit">Resume</button>
+    </form>
+    <span class="result" id="resume-{{ s.session_id }}" aria-live="polite"></span>
+  </td>
+</tr>
