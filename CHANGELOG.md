@@ -15,3 +15,4 @@ All notable changes to this project are recorded here, in the style of
 - Feature catalog (`vigil.catalog`): flags and subcommands parsed from the installed `claude --help`, stored per Claude Code version (migration 0002).
 - Opt-in launch history from shell history (`vigil.history`): bash, zsh and fish history, `claude` invocations only, subcommand and flag names only.
 - Resume launcher (`vigil.resume`, `vigil.terminal`): `claude --bg` with tmux fallback, terminal detection (config template, WSL Windows Terminal, `$TERMINAL`, known terminals), refusals for open sessions, missing folders and missing tools.
+- CLI commands `vigil scan`, `ls`, `show` and `resume`, with `--json` output (`vigil.serialize.session_to_dict`) that the API reuses.
