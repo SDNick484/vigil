@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 # Session IDs are UUIDs; anything else (a leading "-" in particular) is refused rather than passed
 # to `claude` or `tmux`, where it could read as an option or a tmux target pattern.
-_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 _START_TIMEOUT = 20.0
 """How long `execute` waits for `claude --bg` / `tmux new-session -d` to return. Both return as
@@ -217,7 +217,7 @@ def plan_resume(
     allows them; a live session is joined or attached to as it is, without them.
     """
     session_id = session.session_id
-    if not _SESSION_ID.fullmatch(session_id):
+    if not SESSION_ID.fullmatch(session_id):
         raise ResumeRefused(f"not a valid session id: {session_id!r}")
     running = live.get(session_id)
     remote = not TERMINAL_ALLOWED.get()
@@ -289,7 +289,7 @@ def plan_start_new(
     else tmux, always with `--remote-control`, with a terminal only while `TERMINAL_ALLOWED`.
     Raises ResumeRefused as `plan_resume` does.
     """
-    if not _SESSION_ID.fullmatch(new_session_id):
+    if not SESSION_ID.fullmatch(new_session_id):
         raise ResumeRefused(f"not a valid session id: {new_session_id!r}")
     folder = _check_cwd(cwd)
     checked = _with_remote_control(_checked_flags(cfg.default_flags, flags))
@@ -408,7 +408,7 @@ def stop_session(
     author confirmed. Raises ResumeRefused when `claude stop` cannot be run, is too slow or exits
     non-zero, or the session is still live after `timeout`; the caller then starts nothing.
     """
-    if not _SESSION_ID.fullmatch(session_id):
+    if not SESSION_ID.fullmatch(session_id):
         raise ResumeRefused(f"not a valid session id: {session_id!r}")
     refused = ResumeRefused("could not stop the session; nothing was restarted")
     argv = ["claude", "stop", session_id]

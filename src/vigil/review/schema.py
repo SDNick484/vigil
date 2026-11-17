@@ -22,7 +22,7 @@ Kind = Literal["flag", "file", "habit"]
 FileTarget = Literal["project_claude_md", "project_settings", "user_claude_md", "user_settings"]
 
 _SETTINGS_TARGETS = ("project_settings", "user_settings")
-_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _text(description: str) -> dict[str, Any]:
@@ -119,8 +119,8 @@ class Advice:
 
 
 def clean(text: str, limit: int = MAX_TEXT) -> str:
-    """`text` without control characters (C0, DEL and C1, except newline: they could drive a
-    terminal that prints it), cut to `limit` characters."""
+    """`text` without control characters (C0, DEL and C1, except newline and tab: they could
+    drive a terminal that prints it), cut to `limit` characters."""
     return _CONTROL.sub("", text)[:limit]
 
 

@@ -39,7 +39,7 @@ from typing import Any
 from vigil.catalog import CatalogEntry
 from vigil.config import ReviewConfig
 from vigil.index.queries import SessionRow, vigil_launch_flags
-from vigil.resume import ResumeRefused, _check_cwd
+from vigil.resume import SESSION_ID, ResumeRefused, _check_cwd
 from vigil.review.numbers import SessionNumbers, compute_numbers, wall_clock
 from vigil.review.schema import SCHEMA, Advice, Suggestion, clean, parse_output
 from vigil.review.store import (
@@ -227,8 +227,11 @@ def build_prompt(
 
 
 def check_reviewable(row: SessionRow, env: Mapping[str, str] | None = None) -> str:
-    """The folder to review `row` in. Raises ReviewRefused when its folder is gone (`claude
-    --resume` needs it) or `claude` is not on PATH."""
+    """The folder to review `row` in. Raises ReviewRefused when its id is not a session id (it
+    goes into an argv), its folder is gone (`claude --resume` needs it) or `claude` is not on
+    PATH."""
+    if not SESSION_ID.fullmatch(row.session_id):
+        raise ReviewRefused(f"not a valid session id: {row.session_id!r}")
     try:
         cwd = _check_cwd(row.cwd)
     except ResumeRefused as refused:

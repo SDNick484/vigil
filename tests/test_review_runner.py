@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from vigil.review.runner import (
     ReviewRefused,
     ReviewSlot,
     build_prompt,
+    check_reviewable,
     review_argv,
     run_review,
 )
@@ -198,14 +200,14 @@ def test_parse_output_strips_control_characters() -> None:
     item = {
         "kind": "file",
         "title": "Copy \x1b]52;c;cGF5bG9hZA==\x07this",
-        "why": "line one\nline\x00 two\x9b31m",
+        "why": "line one\nline\x00 two\x9b31m\tend",
         "evidence": "turn\r 2",
         "file": {"target": "project_settings", "settings": {"model\x1b": ["a\x07b"]}},
     }
     (suggestion,), _ = parse_output({"suggestions": [item]})
     assert suggestion.title == "Copy ]52;c;cGF5bG9hZA==this"
     assert "\x1b" not in suggestion.title and "\x07" not in suggestion.title
-    assert suggestion.why == "line one\nline two31m"
+    assert suggestion.why == "line one\nline two31m\tend"  # newline and tab are kept
     assert suggestion.evidence == "turn 2"
     assert suggestion.file_settings == {"model": ["ab"]}
 
@@ -336,6 +338,18 @@ def test_review_refused_without_claude(
 ) -> None:
     with pytest.raises(ReviewRefused, match="not on PATH"):
         review(index_db)
+
+
+@pytest.mark.parametrize("session_id", ["--help", "-p", "a b", "../x", ""])
+def test_review_refuses_a_session_id_that_is_not_one(
+    index_db: sqlite3.Connection, fake_bin: FakeBin, session_cwd: Path, session_id: str
+) -> None:
+    fake_bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    row = get_session(index_db, NAMED)
+    assert row is not None
+    with pytest.raises(ReviewRefused, match="not a valid session id"):
+        check_reviewable(replace(row, session_id=session_id))
+    assert check_reviewable(row) == str(session_cwd)
 
 
 def test_review_slot_one_at_a_time() -> None:
