@@ -1,6 +1,11 @@
 {# One review (`vigil.review.store.Review`), as the session page lists it and as
-   GET /sessions/{id}/reviews/{rid} serves it. While it runs it reloads itself every 2 s. #}
-{% set url = "/sessions/" ~ review.session_id|urlencode ~ "/reviews/" ~ review.id %}
+   GET /sessions/{id}/reviews/{rid} serves it. While it runs it reloads itself every 2 s.
+   `review_peer` names the peer whose session it is (a `vigil.peers.PeerReview`, whose
+   `indices` are the peer's positions of its suggestions); its links go to the mirrors under
+   /peers/{peer}/. #}
+{% set peer_name = review_peer|default(none) %}
+{% set prefix = "/peers/" ~ peer_name if peer_name else "" %}
+{% set url = prefix ~ "/sessions/" ~ review.session_id|urlencode ~ "/reviews/" ~ review.id %}
 <article class="review" id="review-{{ review.id }}"{% if review.status == "running" %}
          hx-get="{{ url }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   <h3>Review of {{ review.created_at|when }}
@@ -16,7 +21,7 @@
   {% if review.error %}<p class="muted">Note: {{ review.error }}</p>{% endif %}
   <p class="note">Suggestions come from Claude reading this session. Check them before acting.</p>
   {% for suggestion in review.suggestions %}
-  {% set index = loop.index0 %}
+  {% set index = review.indices[loop.index0] if review.indices is defined else loop.index0 %}
   <div class="suggestion" id="suggestion-{{ review.id }}-{{ index }}">
     <h4>{{ suggestion.title }} <span class="badge">{{ suggestion.kind }}</span></h4>
     <p>{{ suggestion.why }}</p>
@@ -25,7 +30,8 @@
     <p><code>{{ suggestion.flag_name }}{% if suggestion.flag_value %} {{ suggestion.flag_value }}{% endif %}</code></p>
     {% endif %}
     {# Per-card actions, keyed by (review.id, index): `_suggestion_actions.html` gets `review`,
-       `suggestion`, `index` and `catalog`. It also shows a file suggestion's text. #}
+       `suggestion`, `index`, `catalog`, `peer_name` and `prefix`. It also shows a file
+       suggestion's text. #}
     {% include "_suggestion_actions.html" %}
   </div>
   {% else %}

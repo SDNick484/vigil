@@ -31,6 +31,7 @@ CI runs exactly this; run it before every commit:
 - Tests never launch a real Claude session or a real terminal; they put fake `claude`, `tmux`, terminal and `wt.exe` executables on `PATH` that record their argv and cwd.
 - Every PR updates `CHANGELOG.md` under `[Unreleased]` (one line per change).
 - Session reviews run only `claude -p --resume <id> --fork-session --no-session-persistence --tools "" --output-format json --json-schema <schema> --max-budget-usd <budget> [--model <model>] <prompt>` (`vigil.review.runner.review_argv`), in the session's folder, against a session ID present in the index; the fork is never persisted and has no tools. Never add `--bare` or any other flag to it. Review suggestions are untrusted: every text field is cut to 500 characters, and they act only through the allow-lists.
+- Peers forward Resume, Restart with Remote Control, Review and every suggestion action, and apply the same checks as for a local request.
 
 ## Append points
 

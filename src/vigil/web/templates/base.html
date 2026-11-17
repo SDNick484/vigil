@@ -76,13 +76,13 @@
         var flags = document.createElement("code");
         flags.textContent = data.default_flags.join(" ");
         target.className = "result ok";
-        target.append("Saved; every launch now gets ", flags);
+        target.append(data.machine ? "Saved on " + data.machine + "; every launch there now gets " : "Saved; every launch now gets ", flags);
       } else if (data.ok === true && typeof data.path === "string") {
         // Apply on a file suggestion: the file written.
         var written = document.createElement("code");
         written.textContent = data.path;
         target.className = "result ok";
-        target.append("Written: ", written);
+        target.append(data.machine ? "Written on " + data.machine + ": " : "Written: ", written);
       } else if (data.id) {
         target.className = "result ok";
         target.append("Saved");

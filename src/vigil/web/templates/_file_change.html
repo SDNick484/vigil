@@ -1,16 +1,18 @@
-{# The change a project file suggestion would make (GET /reviews/{rid}/suggestions/{i}/change):
-   the diff, the settings keys left alone, and the Apply form, which sends the hash of the file
-   as previewed. A change vigil refuses gets `card` instead: the text to copy and why. #}
+{# The change a project file suggestion would make (GET /reviews/{rid}/suggestions/{i}/change, or
+   its mirror for a peer): `target` (`new_file` when missing), the `diff`, the settings keys left
+   alone (`skipped`: key and current value pairs), and the Apply form, which posts to `base`/apply
+   with `before_hash`, the hash of the file as previewed. A change vigil refuses gets `card`
+   instead: the text to copy and why. #}
 {% if card is defined %}
 {% include "_file_copy.html" %}
 {% else %}
-<p class="muted">{{ change.target }}{% if change.before is none %} (new file){% endif %}</p>
+<p class="muted">{{ target }}{% if new_file %} (new file){% endif %}</p>
 <pre class="diff">{{ diff }}</pre>
 {% for key, value in skipped %}
 <p>Already set, left alone: {{ key }} (currently {{ value }})</p>
 {% endfor %}
 <form method="post" action="{{ base }}/apply" hx-post="{{ base }}/apply" hx-target="#{{ result_id }}">
-  <input type="hidden" name="before_hash" value="{{ change.before_hash }}">
+  <input type="hidden" name="before_hash" value="{{ before_hash }}">
   <button type="submit">Apply</button>
 </form>
 <p class="result" id="{{ result_id }}" aria-live="polite"></p>

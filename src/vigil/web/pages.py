@@ -30,10 +30,14 @@ from vigil.index.queries import (
     vigil_launch_flags,
 )
 from vigil.peers import (
+    PEER_TIMEOUT,
+    PeerReview,
     PeerSession,
     filter_sessions,
     local_machine,
     newest_first,
+    numbers_from_peer,
+    review_from_dict,
     with_machine,
 )
 from vigil.resume import TERMINAL_ALLOWED
@@ -305,6 +309,7 @@ def session_page(request: Request, session_id: str) -> Any:
         "at_desk": TERMINAL_ALLOWED.get(),
         "numbers": _token_numbers(row, flags),
         "reviews": reviews,
+        "review_peer": None,
         "catalog": catalog,
         "review_budget": web.config.review.max_budget_usd,
     }
@@ -314,8 +319,10 @@ def session_page(request: Request, session_id: str) -> Any:
 @router.get("/peers/{peer}/sessions/{session_id}", response_class=HTMLResponse)
 def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
     """A peer's session as the peer last sent it: what it holds, the command that resumes it by
-    hand on that machine, and Resume (forwarded to the peer). Label and note are edited on the
-    peer itself."""
+    hand on that machine, and Resume (forwarded to the peer). Unless the peer is stale, it is
+    also asked now for where the session's tokens went and for its reviews, which are shown with
+    Review this session; reviewing and acting on a suggestion are forwarded to the peer
+    (`vigil.web.review`). Label and note are edited on the peer itself."""
     hub = state(request).peers
     result = hub.results().get(peer) if hub.peer(peer) is not None else None
     row = None
@@ -324,6 +331,23 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
     if result is None or row is None:
         context: dict[str, Any] = {"row": None, "ident": session_id}
         return _render(request, "session_detail.html", context, 404)
+    numbers: SessionNumbers | None = None
+    reviews: list[PeerReview] | None = None
+    reviews_error: str | None = None
+    if not result.stale:
+        ident = quote(row.session_id, safe="")
+        path = f"/api/v1/sessions/{ident}/numbers"
+        status, answer = hub.forward(peer, "GET", path, timeout=PEER_TIMEOUT)
+        numbers = numbers_from_peer(answer) if status == 200 else None
+        path = f"/api/v1/sessions/{ident}/reviews"
+        status, answer = hub.forward(peer, "GET", path, timeout=PEER_TIMEOUT)
+        if status == 200 and isinstance(answer, list):
+            found = (review_from_dict(item, peer) for item in answer)
+            reviews = [review for review in found if review is not None]
+        else:
+            reviews = []
+            reason = answer.get("reason") if isinstance(answer, dict) else None
+            reviews_error = reason if isinstance(reason, str) else f"{peer}: not a list of reviews"
     context = {
         "row": row,
         "chain": [],
@@ -333,6 +357,10 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         "open_links": open_links([row]),
         "busy": busy_keys([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
+        "numbers": numbers,
+        "reviews": reviews,
+        "reviews_error": reviews_error,
+        "review_peer": peer,
     }
     return _render(request, "session_detail.html", context)
 

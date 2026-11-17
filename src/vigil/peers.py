@@ -4,7 +4,10 @@ Each peer in the config (`[[peers]]`: `name`, `url`, `token_file`) runs vigil wi
 on. This one pulls the peer's `GET /api/v1/sessions` (`fetch_peer_sessions`), shows the sessions
 in a merged list with a machine column, and forwards Resume on a peer's session to that peer's
 `POST /sessions/{id}/resume` (`forward_resume`), which starts it there and answers with the
-attach command.
+attach command. Restart with Remote Control, Review and every action on a review's suggestions
+are forwarded the same way (`forward`); the peer runs them and applies its own checks. What a
+peer sends about a review is untrusted and is checked and cleaned here again
+(`review_from_dict`, `numbers_from_peer`, `change_from_dict`).
 
 How a peer's token is handled:
 
@@ -23,18 +26,19 @@ sessions are shown, marked stale.
 """
 
 import json
+import math
 import os
 import re
 import secrets
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any, Literal, cast, get_args
 from urllib.parse import quote
 
 import httpx
@@ -43,12 +47,19 @@ from vigil.config import Config, Peer
 from vigil.index.db import from_db, to_db
 from vigil.index.queries import SessionRow, Status
 from vigil.paths import data_dir
+from vigil.review.numbers import TOP_TOOL_OUTPUTS, SessionNumbers, ToolOutput, TurnTokens
+from vigil.review.schema import MAX_SUGGESTIONS, MAX_TITLE, Suggestion, clean, parse_output
+from vigil.review.store import Review, ReviewStatus
 from vigil.serialize import session_to_dict
 from vigil.transcript import REMOTE_URL
 
 PEER_TIMEOUT = 3.0
 """Seconds a sessions fetch may spend connecting, and waiting for each read; the whole answer
 must also be in within this many seconds of starting (checked as it is read)."""
+
+REVIEW_TIMEOUT = 30.0
+"""Seconds a peer has to answer a forwarded review start (it answers at once, and runs the review
+in the background), Always use or Apply."""
 
 RESUME_TIMEOUT = 330.0
 """Seconds a peer has to answer a forwarded resume once connected: it waits for `claude --bg` or
@@ -77,6 +88,7 @@ TEXT_LIMIT = 500
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _STATUSES: frozenset[str] = frozenset(get_args(Status))
 _SNIPPETS = ("first_prompt", "last_user", "last_assistant")
+_REVIEW_STATUSES: frozenset[str] = frozenset(get_args(ReviewStatus))
 
 
 class PeerError(Exception):
@@ -161,7 +173,9 @@ def _status_problem(response: httpx.Response) -> str:
     return f"answered HTTP {code}"
 
 
-def _read_capped(response: httpx.Response, deadline: float) -> bytes:
+def _read_capped(response: httpx.Response, deadline: float, limit: float = PEER_TIMEOUT) -> bytes:
+    """The body of `response`, refused when it is over `MAX_ANSWER_BYTES` or still coming in
+    after `deadline` (`limit` seconds after the request started)."""
     chunks: list[bytes] = []
     size = 0
     for chunk in response.iter_bytes():
@@ -169,7 +183,7 @@ def _read_capped(response: httpx.Response, deadline: float) -> bytes:
         if size > MAX_ANSWER_BYTES:
             raise PeerError(f"answer larger than {MAX_ANSWER_BYTES} bytes")
         if time.monotonic() > deadline:
-            raise PeerError(f"timed out after {PEER_TIMEOUT:g} s")
+            raise PeerError(f"timed out after {limit:g} s")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -380,6 +394,10 @@ def forward_restart(
     return _forward_launch(peer, session_id, "restart-remote", {"confirm": "yes"}, transport)
 
 
+Answer = dict[str, Any] | list[Any] | str
+"""What `forward` returns besides the status: parsed JSON, or the text of an HTML answer."""
+
+
 def _forward_launch(
     peer: Peer,
     session_id: str,
@@ -388,47 +406,294 @@ def _forward_launch(
     transport: httpx.BaseTransport | None,
 ) -> dict[str, object]:
     """`forward_resume` and `forward_restart`: post `action` for `session_id` to `peer`."""
-    if not _SESSION_ID.fullmatch(session_id):
+    if not is_session_id(session_id):
         raise ResumeForwardError(404, f"not a session id: {session_id!r}")
-    timeout = httpx.Timeout(RESUME_TIMEOUT, connect=PEER_TIMEOUT)
     path = f"/sessions/{quote(session_id, safe='')}/{action}"
-    try:
-        with _client(timeout, transport) as client:
-            response = client.send(_request(client, peer, "POST", path, data=form))
-    except PeerError as error:
-        raise ResumeForwardError(502, f"{peer.name}: {error}") from None
-    except httpx.TimeoutException:
-        raise ResumeForwardError(502, f"{peer.name}: timed out") from None
-    except httpx.HTTPError as error:
-        raise ResumeForwardError(502, f"{peer.name}: unreachable: {error}") from None
-    try:
-        data = response.json()
-    except ValueError:
-        data = None
-    if not isinstance(data, dict):
-        data = {}
-    if response.status_code in (404, 409) and isinstance(data.get("reason"), str):
+    status, data = forward(peer, "POST", path, form, timeout=RESUME_TIMEOUT, transport=transport)
+    return launch_answer(peer.name, status, data)
+
+
+def launch_answer(name: str, status: int, data: Answer) -> dict[str, object]:
+    """What `forward` got from the peer called `name` for something that launches a session (a
+    resume, a restart, or a review suggestion's resume or new session), as `forward_resume`
+    returns it. Raises ResumeForwardError with the peer's refusal, or 502 when the answer is not
+    a launch's."""
+    if not 200 <= status < 300:
+        refusal = data if isinstance(data, dict) else {}
+        reason = refusal.get("reason")
         raise ResumeForwardError(
-            response.status_code,
-            f"{peer.name}: {data['reason']}",
-            restartable=data.get("restartable") is True,
+            status,
+            reason if isinstance(reason, str) else f"{name}: refused",
+            restartable=status == 409 and refusal.get("restartable") is True,
         )
-    if response.status_code != 200:
-        raise ResumeForwardError(502, f"{peer.name}: {_status_problem(response)}")
-    attach = data.get("attach")
-    if data.get("ok") is not True or not isinstance(attach, str):
-        raise ResumeForwardError(502, f"{peer.name}: answered something that is not a resume")
+    attach = data.get("attach") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("ok") is not True or not isinstance(attach, str):
+        raise ResumeForwardError(502, f"{name}: answered something that is not a resume")
     remote_url = data.get("remote_url")
     if not isinstance(remote_url, str) or not REMOTE_URL.fullmatch(remote_url):
         remote_url = None  # it goes into the user's browser: only ever a Claude link
     return {
         "ok": True,
-        "attach": attach,
+        "attach": clean(attach),
         "opened_terminal": data.get("opened_terminal") is True,
         "remote_url": remote_url,
         "pending": data.get("pending") is True,
-        "machine": peer.name,
+        "machine": name,
     }
+
+
+_PASSED_ON = (400, 404, 409)
+"""The refusals of a peer that are passed on as they are (with its name before the reason)."""
+
+
+def _unusable(peer: Peer, problem: str) -> tuple[int, dict[str, Any]]:
+    return 502, {"ok": False, "reason": f"{peer.name}: {problem}"}
+
+
+def forward(
+    peer: Peer,
+    method: Literal["GET", "POST"],
+    path: str,
+    form: Mapping[str, str] | None = None,
+    *,
+    timeout: float,
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[int, Answer]:
+    """Send `method` `path` (with the form fields `form`) to `peer`, with its token, and return
+    its status and answer. The peer has `timeout` seconds to answer in full (`PEER_TIMEOUT` to
+    connect), in at most `MAX_ANSWER_BYTES`.
+
+    A 2xx answer is returned as the peer sent it: parsed JSON (an object or a list), or the text
+    of an HTML answer. A 400, 404 or 409 refusal with a reason (`reason`, or a 404's `detail`)
+    comes back with that status as `{"ok": False, "reason"}`, the reason prefixed with the peer's
+    name and cleaned (`vigil.review.schema.clean`), keeping only a boolean `restartable` and an
+    integer `review_id` from the rest. Anything else (unreachable, timed out, a redirect, a
+    refused token, an answer that is not JSON) is 502 with the reason. Nothing is raised."""
+    deadline = time.monotonic() + timeout
+    data = dict(form) if form is not None else None
+    try:
+        with _client(httpx.Timeout(timeout, connect=PEER_TIMEOUT), transport) as client:
+            response = client.send(_request(client, peer, method, path, data=data), stream=True)
+            try:
+                body = _read_capped(response, deadline, timeout)
+            finally:
+                response.close()
+    except PeerError as error:
+        return _unusable(peer, str(error))
+    except httpx.TimeoutException:
+        return _unusable(peer, "timed out")
+    except httpx.HTTPError as error:
+        return _unusable(peer, f"unreachable: {error}")
+    status = response.status_code
+    try:
+        parsed: Any = json.loads(body)
+    except ValueError, RecursionError:
+        parsed = None
+    if 200 <= status < 300:
+        if isinstance(parsed, dict | list):
+            return status, parsed
+        if response.headers.get("content-type", "").startswith("text/html"):
+            return status, body.decode("utf-8", errors="replace")
+        return _unusable(peer, "answered something that is not JSON")
+    if status in _PASSED_ON and isinstance(parsed, dict):
+        reason = parsed.get("reason")
+        if not isinstance(reason, str) and status == 404:
+            reason = parsed.get("detail")
+        if isinstance(reason, str):
+            refusal: dict[str, Any] = {"ok": False, "reason": f"{peer.name}: {clean(reason)}"}
+            if isinstance(parsed.get("restartable"), bool):
+                refusal["restartable"] = parsed["restartable"]
+            if type(parsed.get("review_id")) is int:
+                refusal["review_id"] = parsed["review_id"]
+            return status, refusal
+    return _unusable(peer, _status_problem(response))
+
+
+def is_session_id(value: str) -> bool:
+    """Whether `value` can be a session id, to put in a path sent to a peer."""
+    return _SESSION_ID.fullmatch(value) is not None
+
+
+@dataclass(frozen=True)
+class PeerReview(Review):
+    """A review of a peer's session, as the peer sent it (`review_from_dict`)."""
+
+    indices: tuple[int, ...] = ()
+    """The peer's position of each of `suggestions`: a suggestion the peer sent that is not valid
+    here is left out, and acting on the others names them by the peer's position."""
+
+
+def _number(value: Any) -> float | None:
+    """`value` when it is a finite number (not a bool) of at least 0."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+
+def _count(value: Any) -> int:
+    """`value` when it is an integer (not a bool) of at least 0; raises ValueError otherwise."""
+    if type(value) is not int or value < 0:
+        raise ValueError("not a count")
+    return value
+
+
+def _turn(data: Any) -> TurnTokens:
+    if not isinstance(data, dict):
+        raise ValueError("not a turn")
+    fields = ("turn", "input", "output", "cache_write", "cache_read")
+    return TurnTokens(*(_count(data.get(key)) for key in fields))
+
+
+def _texts(value: Any) -> list[str]:
+    return (
+        [clean(item) for item in value if isinstance(item, str)] if isinstance(value, list) else []
+    )
+
+
+def numbers_from_peer(data: Any) -> SessionNumbers | None:
+    """A session's numbers as a peer serves them (`vigil.review.numbers.numbers_to_dict`), or
+    None when they are not valid: counts must be integers, texts are cleaned
+    (`vigil.review.schema.clean`)."""
+    if not isinstance(data, dict):
+        return None
+    try:
+        turns, outputs = data.get("turns"), data.get("largest_tool_outputs")
+        if not isinstance(turns, list) or not isinstance(outputs, list):
+            return None
+        share = _number(data.get("cache_hit_share"))
+        if share is None or share > 1:
+            return None
+        return SessionNumbers(
+            turns=[_turn(item) for item in turns],
+            totals=_turn(data.get("totals")),
+            cache_hit_share=share,
+            largest_tool_outputs=[
+                ToolOutput(clean(item["tool"], MAX_TITLE), _count(item.get("size")))
+                for item in outputs[:TOP_TOOL_OUTPUTS]
+                if isinstance(item, dict) and isinstance(item.get("tool"), str)
+            ],
+            compactions=_count(data.get("compactions")),
+            models=_texts(data.get("models")),
+            started_at=_time(data, "started_at"),
+            ended_at=_time(data, "ended_at"),
+            launch_flags=_texts(data.get("launch_flags")),
+        )
+    except ValueError:
+        return None
+
+
+def _peer_suggestion(item: Any) -> Suggestion | None:
+    """A suggestion as a peer serves it (flat, `dataclasses.asdict`), checked and cleaned as
+    Claude's answer is (`vigil.review.schema.parse_output`); None when it is not valid."""
+    if not isinstance(item, dict):
+        return None
+    answer = {
+        "kind": item.get("kind"),
+        "title": item.get("title"),
+        "why": item.get("why"),
+        "evidence": item.get("evidence"),
+        "flag": {"name": item.get("flag_name"), "value": item.get("flag_value")},
+        "file": {
+            "target": item.get("file_target"),
+            "text": item.get("file_text"),
+            "settings": item.get("file_settings"),
+        },
+    }
+    found, _ = parse_output({"suggestions": [answer]})
+    return found[0] if found else None
+
+
+def _optional_text(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    return clean(value) if isinstance(value, str) else None
+
+
+def review_from_dict(data: Any, peer: str) -> PeerReview | None:
+    """A review as a peer serves it (`vigil.review.store.review_to_dict`), or None when it has no
+    usable id, session id, creation time or status. It is untrusted: its suggestions and advice
+    are checked and cleaned as Claude's answer is (an invalid one is left out; at most
+    `MAX_SUGGESTIONS` of the peer's first positions are looked at), other texts are cleaned, and
+    `machine` is the peer's configured name."""
+    if not isinstance(data, dict):
+        return None
+    review_id, session_id, status = data.get("id"), data.get("session_id"), data.get("status")
+    created_at = _time(data, "created_at")
+    if type(review_id) is not int or not isinstance(session_id, str):
+        return None
+    if not is_session_id(session_id) or status not in _REVIEW_STATUSES or created_at is None:
+        return None
+    items = data.get("suggestions")
+    found = [
+        (index, _peer_suggestion(item))
+        for index, item in enumerate(items[:MAX_SUGGESTIONS] if isinstance(items, list) else [])
+    ]
+    kept = [(index, suggestion) for index, suggestion in found if suggestion is not None]
+    _, advice = parse_output({"token_advice": data.get("advice")})
+    numbers = data.get("numbers")
+    return PeerReview(
+        id=review_id,
+        session_id=session_id,
+        machine=peer,
+        created_at=created_at,
+        finished_at=_time(data, "finished_at"),
+        claude_version=_optional_text(data, "claude_version"),
+        model=_optional_text(data, "model"),
+        cost_usd=_number(data.get("cost_usd")),
+        status=cast(ReviewStatus, status),
+        numbers=numbers_from_peer(numbers) if numbers is not None else None,
+        suggestions=[suggestion for _, suggestion in kept],
+        advice=advice,
+        error=_optional_text(data, "error"),
+        indices=tuple(index for index, _ in kept),
+    )
+
+
+HASH = re.compile(r"[0-9a-f]{64}")
+"""A `vigil.apply.file_hash`, as a preview carries it."""
+
+MAX_DIFF = 1_000_000
+"""Most characters of a peer's diff shown."""
+
+_DIFF_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+@dataclass(frozen=True)
+class PeerChange:
+    """The change a file suggestion would make on a peer, as it previewed it."""
+
+    target: str
+    new_file: bool
+    diff: str
+    skipped: list[tuple[str, str]]
+    """Settings keys left alone, each with its current value as JSON text."""
+    before_hash: str
+
+
+def change_from_dict(data: Any) -> PeerChange | None:
+    """A preview as a peer serves it (`GET /api/v1/reviews/{rid}/suggestions/{i}/change`), or
+    None when it is not one. Texts lose their control characters (the diff keeps tabs and
+    newlines) and are cut; the hash must be a hash."""
+    if not isinstance(data, dict):
+        return None
+    target, diff, before_hash = data.get("target"), data.get("diff"), data.get("before_hash")
+    skipped = data.get("skipped")
+    if not isinstance(target, str) or not isinstance(diff, str) or not isinstance(skipped, list):
+        return None
+    if not isinstance(before_hash, str) or not HASH.fullmatch(before_hash):
+        return None
+    return PeerChange(
+        target=clean(target, 4096),
+        new_file=data.get("new_file") is True,
+        diff=_DIFF_CONTROL.sub("", diff)[:MAX_DIFF],
+        skipped=[
+            (clean(item["key"]), clean(item["current"]))
+            for item in skipped
+            if isinstance(item, dict)
+            and isinstance(item.get("key"), str)
+            and isinstance(item.get("current"), str)
+        ],
+        before_hash=before_hash,
+    )
 
 
 class PeerHub:
@@ -506,6 +771,26 @@ class PeerHub:
             return forward_restart(peer, session_id, transport=self.transport)
         finally:
             self.forget(name)
+
+    def forward(
+        self,
+        name: str,
+        method: Literal["GET", "POST"],
+        path: str,
+        form: Mapping[str, str] | None = None,
+        *,
+        timeout: float,
+    ) -> tuple[int, Answer]:
+        """`forward` to the peer called `name`; 404 when there is none. After a POST the peer's
+        sessions are fetched again next time, for their new status."""
+        peer = self.peer(name)
+        if peer is None:
+            return 404, {"ok": False, "reason": f"no peer called {name!r}"}
+        try:
+            return forward(peer, method, path, form, timeout=timeout, transport=self.transport)
+        finally:
+            if method == "POST":
+                self.forget(name)
 
     def _peer_or_404(self, name: str) -> Peer:
         peer = self.peer(name)

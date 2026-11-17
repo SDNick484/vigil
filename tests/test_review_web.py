@@ -25,6 +25,7 @@ from vigil.apply import file_hash
 from vigil.config import load_config
 from vigil.index.db import connect
 from vigil.index.scanner import scan
+from vigil.review.numbers import compute_numbers, numbers_to_dict
 from vigil.review.runner import STOPPED
 from vigil.review.schema import Advice, FileTarget, Suggestion
 from vigil.review.store import INTERRUPTED, finish, get_review
@@ -702,3 +703,67 @@ def test_user_target_copy_only(
         thaw_tree(vigil_env.claude_home)
     assert not (project / ".claude").exists()
     assert (tmp_path / "elsewhere.md").read_text() == "Elsewhere.\n"
+
+
+# The JSON reads a peer's mirrors render from (Task 10).
+
+
+def test_numbers_endpoint(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    usage = Path(__file__).parent / "fixtures" / "transcripts" / "handmade" / "usage.jsonl"
+    conn = sqlite3.connect(vigil_env.index)
+    with conn:
+        conn.execute(
+            "UPDATE sessions SET transcript_path = ? WHERE session_id = ?", (str(usage), NAMED)
+        )
+    conn.close()
+    response = web_client.get(f"/api/v1/sessions/{NAMED}/numbers")
+    assert response.status_code == 200, response.text
+    assert response.json() == numbers_to_dict(compute_numbers(usage, []))
+    assert response.json()["totals"]["output"] == 180
+    # By unique id prefix, as the other session reads.
+    assert web_client.get(f"/api/v1/sessions/{NAMED[:8]}/numbers").json()["totals"]["output"] == 180
+
+    assert web_client.get("/api/v1/sessions/nothing/numbers").status_code == 404
+    conn = sqlite3.connect(vigil_env.index)
+    with conn:
+        conn.execute("UPDATE sessions SET transcript_path = '/nonexistent.jsonl'")
+    conn.close()
+    assert web_client.get(f"/api/v1/sessions/{NAMED}/numbers").status_code == 404
+
+
+def test_api_review_and_change(vigil_env: VigilEnv, web_client: TestClient, project: Path) -> None:
+    (project / ".claude").mkdir()
+    (project / ".claude" / "settings.json").write_text('{"cleanupPeriodDays": 30}\n')
+    review_id = file_review(
+        vigil_env,
+        file_card("project_claude_md", "Run the tests."),
+        file_card("project_settings", settings={"cleanupPeriodDays": 7, "model": "opus"}),
+        file_card("user_claude_md", "Be brief."),
+        flag_card("--model", "opus"),
+    )
+    review = web_client.get(f"/api/v1/reviews/{review_id}")
+    assert review.status_code == 200, review.text
+    assert review.json() == web_client.get(f"/api/v1/sessions/{NAMED}/reviews").json()[0]
+    assert web_client.get(f"/api/v1/reviews/{review_id + 1}").status_code == 404
+
+    target = project.resolve() / "CLAUDE.md"
+    change = web_client.get(f"/api/v1/reviews/{review_id}/suggestions/0/change")
+    assert change.status_code == 200, change.text
+    assert change.json() == {
+        "target": str(target),
+        "new_file": True,
+        "diff": f"--- /dev/null\n+++ {target}\n@@ -0,0 +1 @@\n+Run the tests.",
+        "skipped": [],
+        "before_hash": file_hash(target, None),
+    }
+    assert not target.exists()
+    change = web_client.get(f"/api/v1/reviews/{review_id}/suggestions/1/change").json()
+    assert change["new_file"] is False
+    assert change["skipped"] == [{"key": "cleanupPeriodDays", "current": "30"}]
+    # Refused: a user target, not a file suggestion, no such suggestion.
+    refused = web_client.get(f"/api/v1/reviews/{review_id}/suggestions/2/change")
+    assert refused.status_code == 409
+    assert refused.json()["ok"] is False and "Claude home" in refused.json()["reason"]
+    refused = web_client.get(f"/api/v1/reviews/{review_id}/suggestions/3/change")
+    assert refused.status_code == 409
+    assert web_client.get(f"/api/v1/reviews/{review_id}/suggestions/4/change").status_code == 404
