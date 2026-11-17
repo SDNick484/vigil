@@ -44,7 +44,7 @@ def test_connect_applies_migrations_once(tmp_path: Path) -> None:
     conn = connect(path)
     try:
         applied = conn.execute("SELECT version, name FROM schema_migrations").fetchall()
-        assert [tuple(r) for r in applied] == [(1, "0001_core.sql")]
+        assert [tuple(r) for r in applied] == [(v, name) for v, name, _ in db.migrations()]
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"sessions", "session_models", "session_features", "file_state"} <= tables
@@ -70,7 +70,8 @@ def test_failed_migration_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyP
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "half" not in tables
-        assert [r[0] for r in conn.execute("SELECT version FROM schema_migrations")] == [1]
+        applied = [r[0] for r in conn.execute("SELECT version FROM schema_migrations")]
+        assert applied == [version for version, _, _ in good]
     finally:
         conn.close()
 
