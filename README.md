@@ -260,6 +260,7 @@ Each session has the same fields as `vigil ls --json` (and `vigil show --json` f
 | `previous_id`, `chain_id` | The session this one continued, if known; the id shared by a resume chain. |
 | `project_key`, `project_label` | The project: git remote URL, else the folder. |
 | `transcript_path` | The transcript file. |
+| `remote_url`, `remote_url_at` | The session's Claude Remote Control link (null if none) and when it was written. |
 | `status` | `running` (open in a terminal), `background`, `idle`, or `unknown` when the installed `claude` cannot list live sessions. Refreshed at most every 5 seconds. |
 
 Two actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own

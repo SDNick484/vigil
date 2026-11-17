@@ -191,7 +191,7 @@ def _apply_bridge_status(facts: SessionFacts, record: dict[str, Any], at: dateti
 
 def find_remote_url(path: Path, after: datetime) -> str | None:
     """The URL of the newest valid `bridge_status` record in `path` written strictly after
-    `after`, else None. Reads the whole file."""
+    `after` (which must be timezone-aware, in UTC), else None. Reads the whole file."""
     newest: tuple[datetime, str] | None = None
     data = path.read_bytes()
     for line in data.split(b"\n"):

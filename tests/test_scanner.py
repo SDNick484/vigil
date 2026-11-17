@@ -383,10 +383,21 @@ def test_remote_url_stored_and_listed(home: Path, conn: sqlite3.Connection) -> N
     assert row.remote_url == "https://claude.ai/code/session_PLACEHOLDER02"
     assert row.remote_url_at == datetime(2026, 11, 17, 11, 5, tzinfo=UTC)
     assert get_session(conn, PLAIN).remote_url is None  # type: ignore[union-attr]
-    # An incremental scan keeps it.
+    count = row.message_count
+    # An incremental scan picks up a newer link.
     path = home / "projects" / HANDMADE_PROJECT_DIR / "remote-control.jsonl"
+    newer = {
+        "type": "system",
+        "subtype": "bridge_status",
+        "url": "https://claude.ai/code/session_PLACEHOLDER03",
+        "timestamp": "2026-11-17T12:00:00.000Z",
+        "sessionId": REMOTE,
+    }
     with path.open("a") as handle:
-        handle.write('{"type":"system","subtype":"other","timestamp":"2026-11-17T12:00:00.000Z"}\n')
+        handle.write(json.dumps(newer) + "\n")
     scan(conn, home)
     row = get_session(conn, REMOTE)
-    assert row is not None and row.remote_url == "https://claude.ai/code/session_PLACEHOLDER02"
+    assert row is not None
+    assert row.remote_url == "https://claude.ai/code/session_PLACEHOLDER03"
+    assert row.remote_url_at == datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+    assert row.message_count == count
