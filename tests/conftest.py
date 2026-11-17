@@ -118,3 +118,15 @@ def index_db(tmp_path: Path, claude_home: Path) -> Iterator[sqlite3.Connection]:
     scan(conn, claude_home)
     yield conn
     conn.close()
+
+
+@pytest.fixture
+def proc_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point WSL detection at a fake `/proc/version` (a plain Linux kernel string), so tests never
+    depend on the real machine. Overwrite the file to simulate WSL."""
+    import vigil.terminal
+
+    path = tmp_path / "proc_version"
+    path.write_text("Linux version 6.0.0 (builder@example) (gcc) #1 SMP\n")
+    monkeypatch.setattr(vigil.terminal, "PROC_VERSION", path)
+    return path
