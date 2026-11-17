@@ -1,5 +1,8 @@
+import json
 import sqlite3
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from vigil.review.numbers import SessionNumbers, TurnTokens
 from vigil.review.schema import Advice, Suggestion
@@ -86,6 +89,41 @@ def test_insert_and_finish(index_db: sqlite3.Connection) -> None:
         "sonnet",
     )
     assert running_review(index_db) is None
+
+
+def strict(text: str) -> object:
+    """`text` as JSON, refusing NaN and Infinity."""
+
+    def refuse(name: str) -> object:
+        raise ValueError(name)
+
+    return json.loads(text, parse_constant=refuse)
+
+
+def test_non_finite_numbers_are_dropped_before_storing(index_db: sqlite3.Connection) -> None:
+    numbers = replace(NUMBERS, cache_hit_share=float("nan"))
+    review_id = insert_running(
+        index_db,
+        session_id=NAMED,
+        machine="placeholder-host",
+        numbers=numbers,
+        claude_version=None,
+        model=None,
+    )
+    settings = {"model": "opus", "autoCompactThreshold": float("inf"), "x": [float("nan"), 1]}
+    card = replace(
+        FLAG, kind="file", flag_name=None, flag_value=None, file_target="project_settings",
+        file_settings=settings,
+    )  # fmt: skip
+    finish(index_db, review_id, suggestions=[card], advice=[], cost_usd=float("nan"))
+    stored = index_db.execute(
+        "SELECT numbers, suggestions, cost_usd FROM reviews WHERE id = ?", (review_id,)
+    ).fetchone()
+    assert "cache_hit_share" not in cast(dict[str, object], strict(stored["numbers"]))
+    assert strict(stored["suggestions"]) == [
+        {**asdict(card), "file_settings": {"model": "opus", "x": [1]}}
+    ]
+    assert stored["cost_usd"] is None
 
 
 def test_fail_keeps_numbers(index_db: sqlite3.Connection) -> None:

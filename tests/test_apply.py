@@ -202,6 +202,26 @@ def test_settings_value_rules_allow(folder: Path, home: Path) -> None:
     assert json.loads(change.after) == settings
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_settings_non_finite_number_refused(folder: Path, home: Path, value: float) -> None:
+    suggestion = file_card("project_settings", settings={"autoCompactThreshold": value})
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(suggestion, folder, home)
+    assert "the settings key autoCompactThreshold must be" in refused.value.reason
+    assert list(folder.iterdir()) == []
+
+
+def test_settings_existing_non_finite_number_refused(folder: Path, home: Path) -> None:
+    # Python's json reads NaN; written back it would not be JSON.
+    (folder / ".claude").mkdir()
+    settings = folder / ".claude" / "settings.json"
+    settings.write_text('{"autoCompactThreshold": NaN}\n')
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(file_card("project_settings", settings={"model": "opus"}), folder, home)
+    assert "NaN or Infinity" in refused.value.reason
+    assert settings.read_text() == '{"autoCompactThreshold": NaN}\n'
+
+
 def test_settings_existing_value_of_another_kind_refused(folder: Path, home: Path) -> None:
     (folder / ".claude").mkdir()
     existing = '{"permissions": {"deny": "WebFetch"}}\n'

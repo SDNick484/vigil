@@ -16,6 +16,7 @@ changed, only added to.
 import difflib
 import hashlib
 import json
+import math
 import os
 import stat
 import subprocess
@@ -160,7 +161,7 @@ def check_settings(settings: object) -> dict[str, Any]:
     The value rules: `model` printable text of 1 to 64 characters; `effortLevel` one of
     `EFFORT_LEVELS`; `permissions.deny` and `permissions.ask` lists of non-empty printable text;
     `includeCoAuthoredBy` true or false; `cleanupPeriodDays` a whole number of at least 1; a
-    top-level `autoCompact*` key text, a number or true/false (never an object or a list)."""
+    top-level `autoCompact*` key text, a finite number or true/false (never an object or a list)."""
     if not isinstance(settings, dict) or not settings:
         raise ApplyRefused("the suggested settings are not a JSON object")
     if any(_invisible(text) for text in _strings(settings)):
@@ -187,8 +188,10 @@ def check_settings(settings: object) -> dict[str, Any]:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 _wrong(key, "a whole number of at least 1")
         elif key.startswith(_AUTO_COMPACT):
-            if not isinstance(value, str | int | float | bool):
-                _wrong(key, "text, a number or true/false")
+            if not isinstance(value, str | int | float | bool) or (
+                isinstance(value, float) and not math.isfinite(value)
+            ):
+                _wrong(key, "text, a finite number or true/false")
         else:
             _not_applied(key)
     return settings
@@ -231,7 +234,8 @@ def plan_change(s: Suggestion, folder: Path, claude_home: Path) -> Change:
 
     Raises ApplyRefused when `check_suggestion` does, when the target is refused
     (`_check_target`), when the file is not UTF-8, and when an existing settings file is not a
-    JSON object or holds a value of another kind (such as a list) where the suggestion merges in.
+    JSON object or holds a value of another kind (such as a list) where the suggestion merges in,
+    or when the merged settings would hold NaN or Infinity (which JSON cannot).
     """
     check_suggestion(s)
     assert s.file_target is not None  # checked above
@@ -251,7 +255,13 @@ def plan_change(s: Suggestion, folder: Path, claude_home: Path) -> Change:
     else:
         existing = _settings_object(target, before)
         merged = _merge(target, existing, s.file_settings, (), skipped, current)
-        after = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
+        try:
+            after = json.dumps(merged, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        except ValueError as error:
+            raise ApplyRefused(
+                f"{target} would hold a number JSON cannot (NaN or Infinity); vigil will not "
+                "write it"
+            ) from error
     return Change(target, before, after, file_hash(target, data), skipped, current, real_folder)
 
 

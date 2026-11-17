@@ -2,6 +2,7 @@
 `failed`. A review goes when its session leaves the index (the foreign key cascades)."""
 
 import json
+import math
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -35,6 +36,29 @@ class Review:
     advice: list[Advice]
     error: str | None
     """Why it failed; on a review that is done, a note such as going over the budget."""
+
+
+def _finite(value: Any) -> bool:
+    return not isinstance(value, float) or math.isfinite(value)
+
+
+def _without_non_finite(value: Any) -> Any:
+    """`value` (JSON-like) with every NaN and Infinity, which JSON cannot hold, dropped from the
+    objects and lists in it."""
+    if isinstance(value, dict):
+        return {key: _without_non_finite(item) for key, item in value.items() if _finite(item)}
+    if isinstance(value, list):
+        return [_without_non_finite(item) for item in value if _finite(item)]
+    return value
+
+
+def _cost(cost_usd: float | None) -> float | None:
+    return cost_usd if cost_usd is not None and math.isfinite(cost_usd) else None
+
+
+def _dump(value: Any) -> str:
+    """`value` as strict JSON, for a column: non-finite numbers dropped first."""
+    return json.dumps(_without_non_finite(value), allow_nan=False)
 
 
 def _load(text: str | None) -> Any:
@@ -117,7 +141,7 @@ def insert_running(
                 to_db(created_at or datetime.now(UTC)),
                 claude_version,
                 model,
-                json.dumps(numbers_to_dict(numbers)),
+                _dump(numbers_to_dict(numbers)),
             ),
         )
     review_id = cursor.lastrowid
@@ -143,9 +167,9 @@ def finish(
             "cost_usd = ?, model = COALESCE(?, model), error = ? WHERE id = ?",
             (
                 to_db(datetime.now(UTC)),
-                json.dumps([asdict(s) for s in suggestions]),
-                json.dumps([asdict(a) for a in advice]),
-                cost_usd,
+                _dump([asdict(s) for s in suggestions]),
+                _dump([asdict(a) for a in advice]),
+                _cost(cost_usd),
                 model,
                 error,
                 review_id,
@@ -161,7 +185,7 @@ def fail(
         conn.execute(
             "UPDATE reviews SET status = 'failed', finished_at = ?, error = ?, cost_usd = ? "
             "WHERE id = ?",
-            (to_db(datetime.now(UTC)), error, cost_usd, review_id),
+            (to_db(datetime.now(UTC)), error, _cost(cost_usd), review_id),
         )
 
 
