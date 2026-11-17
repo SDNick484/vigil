@@ -349,13 +349,31 @@ def test_idle_fold_pluralises(web_client: TestClient) -> None:
 
 
 def test_search_opens_matching_projects(web_client: TestClient) -> None:
-    make_live(web_client, {NAMED: "background"})
+    # Nothing is live, so fixture-repo is a quiet project; a search opens it all the same.
+    quiet = web_client.get("/").text
+    assert '<details class="project">' in quiet and '<details class="project" open>' not in quiet
     page = web_client.get("/", params={"q": "fixture"}).text
-    # Only fixture-repo has a match, and it opens although it is not active.
-    assert page.count('<details class="project" open>') == 1
+    assert page.count('<details class="project" open>') == 1  # broken-repo has no match
     assert '<details class="project">' not in page
-    assert not re.search(r'class="[^"]*\bfolded\b', page) and 'class="more"' not in page
     assert len(row_ids(page)) > 1
+
+    # An active project opens with every session unfolded.
+    make_live(web_client, {NAMED: "background"})
+    folded = web_client.get("/").text
+    assert re.search(r'class="[^"]*\bfolded\b', folded) and 'class="more"' in folded
+    page = web_client.get("/", params={"q": "fixture"}).text
+    assert not re.search(r'class="[^"]*\bfolded\b', page) and 'class="more"' not in page
+
+
+def test_only_this_project_link(web_client: TestClient) -> None:
+    key = "/home/user/src/broken-repo"
+    page = web_client.get("/").text
+    assert 'href="/?project=/home/user/src/broken-repo">Only this project</a>' in page
+    # It sits in the card body, not in the summary, so tapping the summary still toggles.
+    card = page[page.index("broken-repo</span>") :]
+    assert card.index("</summary>") < card.index("Only this project")
+    filtered = web_client.get("/", params={"project": key}).text
+    assert "Only this project" not in filtered and "show all" in filtered
 
 
 def test_summary_line(web_client: TestClient) -> None:

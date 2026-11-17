@@ -29,6 +29,9 @@
     </span>
     <code class="path">{{ group.key }}</code>
   </summary>
+  {% if group.key != project %}
+  <p class="only"><a href="/?project={{ group.key|urlencode }}">Only this project</a></p>
+  {% endif %}
   <ul class="sessions">
     {% for s in group.sessions %}
     {% set folded = group.active and not searching and not is_active(s) %}

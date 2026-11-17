@@ -21,6 +21,7 @@ All notable changes to this project are recorded here, in the style of
 - Usage report (`vigil usage`, `GET /api/v1/usage`, `GET /api/v1/catalog`, `/usage` page): what you use inside sessions, how you launch `claude` (short flags counted as their long names), and which flags and subcommands of the installed version you have never tried.
 - Remote access (v2): optional non-loopback bind (`server.bind`) behind a token (`server.token_file`, mode 0600), bearer auth for API clients, a `/login` page with a signed HttpOnly, SameSite=Strict session cookie for browsers, `server.allowed_hosts`, and no terminal for remote resume.
 - Peers (v2): `[[peers]]` and `machine` in the config, a merged sessions list with a machine column, stale last-known sessions for offline peers (cached in the data dir), peer session pages, Resume forwarded to the owning peer (`POST /peers/{name}/sessions/{id}/resume`), and `GET /api/v1/peers`; httpx is now a runtime dependency.
+- Sessions page: active projects open on top, quiet projects collapsed to one line, idle sessions folded, a status summary, and phone-first rows.
 
 ### Changed
 - Install guide rewritten step by step: install without pipx (a virtual environment), checks after each step, which way to keep vigil running, upgrade, uninstall and troubleshooting; the service files also look for `claude` in `/opt/bin`.

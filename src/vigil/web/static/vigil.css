@@ -176,3 +176,8 @@ button.more {
   background: none;
   color: var(--accent);
 }
+details.project .only { margin: 0; padding: 0 0.75rem; font-size: 0.8rem; }
+details.project .only a { display: inline-flex; align-items: center; min-height: 2.5rem; }
+li.session .name a { display: inline-flex; align-items: center; min-height: 2.5rem; }
+form.search button { min-height: 2.5rem; }
+form.search label { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 2.5rem; }
