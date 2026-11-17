@@ -266,6 +266,7 @@ def session_from_dict(
         remote_url=remote_url,
         remote_url_at=_time(data, "remote_url_at") if remote_url else None,
         open_url=open_url,
+        busy=data.get("busy") is True and not stale,
         peer=peer,
         stale=stale,
     )

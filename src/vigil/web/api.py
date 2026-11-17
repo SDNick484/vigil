@@ -42,6 +42,7 @@ from vigil.resume import (
     execute,
     joinable_link,
     plan_resume,
+    session_lock,
     stop_session,
 )
 from vigil.serialize import apply_status, session_to_dict
@@ -86,6 +87,7 @@ class SessionOut(BaseModel):
     remote_url: str | None
     remote_url_at: str | None
     open_url: str | None
+    busy: bool
 
 
 class SessionDetailOut(SessionOut):
@@ -342,12 +344,14 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
         row = get_session(conn, session_id)
         if row is None:
             return _refusal(404, _no_session(session_id))
-        # Fresh, not cached: never start a second process on a session that just opened.
-        caps, live = web.live.get(fresh=True)
-        try:
-            started = _start(web, conn, row, caps, live)
-        except ResumeRefused as refused:
-            return _refusal(409, refused.reason, restartable=refused.restartable)
+        # One launch of a session at a time, and a fresh look at what is live (not the cached
+        # one) under that lock: never start a second process on a session that just opened.
+        with session_lock(row.session_id):
+            caps, live = web.live.get(fresh=True)
+            try:
+                started = _start(web, conn, row, caps, live)
+            except ResumeRefused as refused:
+                return _refusal(409, refused.reason, restartable=refused.restartable)
     return _answer(web, row, started)
 
 
@@ -374,6 +378,11 @@ def _start(
         return _Started(plan, shlex.join(plan.attach), None, joinable_link(row, live))
     launched_at = datetime.now(UTC)
     return _Started(plan, execute(plan, conn=conn), launched_at, None)
+
+
+def _without(live: dict[str, LiveSession], row: SessionRow) -> dict[str, LiveSession]:
+    """`live` as it will be once `row` is stopped."""
+    return {session_id: item for session_id, item in live.items() if session_id != row.session_id}
 
 
 def _answer(web: WebState, row: SessionRow, started: _Started) -> dict[str, object]:
@@ -405,8 +414,11 @@ def restart_remote(
 ) -> dict[str, object] | JSONResponse:
     """Stop a session running in the background and start it again with Remote Control, for a
     session that has no link to join by. Interrupts whatever it is doing, so the form must say
-    `confirm=yes` (400 otherwise). 409 unless the session is running in the background (nothing
-    is touched), or when it cannot be stopped (nothing is started).
+    `confirm=yes` (400 otherwise). 409 unless the session is running in the background, or when
+    the restart could not go ahead (the session is planned for before anything is stopped, so a
+    bad config, a missing folder or tmux and the like refuse with it untouched), or when it
+    cannot be stopped (nothing is started). If it is stopped but then cannot be started, the
+    reason says so.
 
     After the stop it is the resume of a session that is not running: from another machine no
     terminal is opened, and the answer is that of a resume (the link, or `pending`)."""
@@ -417,18 +429,27 @@ def restart_remote(
         row = get_session(conn, session_id)
         if row is None:
             return _refusal(404, _no_session(session_id))
-        _, live = web.live.get(fresh=True)
-        running = live.get(row.session_id)
-        if running is None or running.kind != "background":
-            return _refusal(
-                409, "only a session running in the background can be restarted", restartable=False
-            )
-        try:
-            stop_session(row.session_id, lambda: web.live.get(fresh=True)[1])
+        with session_lock(row.session_id):
             caps, live = web.live.get(fresh=True)
-            started = _start(web, conn, row, caps, live)
-        except ResumeRefused as refused:
-            return _refusal(409, refused.reason, restartable=refused.restartable)
+            running = live.get(row.session_id)
+            if running is None or running.kind != "background":
+                return _refusal(
+                    409,
+                    "only a session running in the background can be restarted",
+                    restartable=False,
+                )
+            try:
+                # Everything that can refuse a start is checked before anything is stopped.
+                plan_resume(row, caps, _without(live, row), web.config.resume, os.environ)
+                stop_session(row.session_id, web.live.probe)
+            except ResumeRefused as refused:
+                return _refusal(409, refused.reason, restartable=False)
+            caps, live = web.live.get(fresh=True)
+            try:
+                started = _start(web, conn, row, caps, live)
+            except ResumeRefused as refused:
+                reason = f"stopped, but could not start it again: {refused.reason}"
+                return _refusal(409, reason, restartable=False)
     return _answer(web, row, started)
 
 
@@ -470,7 +491,12 @@ def resume_on_peer(
 @actions.post(
     "/peers/{peer}/sessions/{session_id}/restart-remote",
     response_model=ForwardedResumeOut,
-    responses={404: {"model": RefusalOut}, 409: {"model": RefusalOut}, 502: {"model": RefusalOut}},
+    responses={
+        400: {"model": RefusalOut},
+        404: {"model": RefusalOut},
+        409: {"model": RefusalOut},
+        502: {"model": RefusalOut},
+    },
 )
 def restart_on_peer(
     request: Request, peer: str, session_id: str, confirm: Annotated[str | None, Form()] = None

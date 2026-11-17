@@ -50,6 +50,9 @@ class SessionRow:
     open_url: str | None = None
     """The link to join the session by right now (`vigil.serialize.open_link`), set along with
     `status` by `apply_status`; None when it is not live or has no current link."""
+    busy: bool = False
+    """The live session is working right now (`LiveSession.busy`), set by `apply_status`; False
+    when it is not live or the live sessions are not known."""
 
 
 @dataclass(frozen=True)

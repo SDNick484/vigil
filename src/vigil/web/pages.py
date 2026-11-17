@@ -19,7 +19,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from vigil.claude_cli import LiveSession
 from vigil.commands import resume_command
 from vigil.index.queries import SessionRow, chain, get_session, list_projects, list_sessions
 from vigil.peers import (
@@ -95,14 +94,10 @@ def restart_url(row: SessionRow) -> str:
     return session_url(row) + "/restart-remote"
 
 
-def busy_keys(rows: list[SessionRow], live: dict[str, LiveSession]) -> set[str]:
-    """The `row_key` of each of this machine's own `rows` whose live session is working now.
-    A peer's rows are never in it: what a peer sent says nothing about that."""
-    return {
-        row_key(row)
-        for row in rows
-        if peer_of(row) is None and (running := live.get(row.session_id)) and running.busy
-    }
+def busy_keys(rows: list[SessionRow]) -> set[str]:
+    """The `row_key` of each of `rows` whose live session is working now, as its owning machine
+    says (`SessionRow.busy`)."""
+    return {row_key(row) for row in rows if row.busy}
 
 
 templates = Jinja2Templates(directory=WEB_DIR / "templates")
@@ -251,7 +246,7 @@ def sessions_page(
         "machines": bool(web.config.peers),
         "offline": offline,
         "open_links": open_links(rows),
-        "busy": busy_keys(rows, live),
+        "busy": busy_keys(rows),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     if request.headers.get("hx-request") == "true":
@@ -280,7 +275,7 @@ def session_page(request: Request, session_id: str) -> Any:
         "command": resume_command(row),
         "machine": local_machine(web.config),
         "open_links": open_links([row]),
-        "busy": busy_keys([row], live),
+        "busy": busy_keys([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)
@@ -306,7 +301,7 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         "machine": peer,
         "result": result,
         "open_links": open_links([row]),
-        "busy": set(),
+        "busy": busy_keys([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)

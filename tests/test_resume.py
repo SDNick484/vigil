@@ -550,3 +550,18 @@ def test_stop_session_refuses_a_bad_id_and_a_missing_claude(fake_bin: FakeBin) -
     with pytest.raises(ResumeRefused, match="could not stop the session"):
         stop_session(SID, dict)  # no `claude` on PATH
     assert fake_bin.calls("claude") == []
+
+
+def test_stop_session_treats_an_unknown_live_state_as_still_live(fake_bin: FakeBin) -> None:
+    fake_bin.install("claude")
+    clock = Clock()
+    answers: list[dict[str, LiveSession] | None] = [None, {}, None]
+
+    def probe() -> dict[str, LiveSession] | None:
+        return answers.pop(0) if answers else None
+
+    # A failed look is not "gone": the stop is only believed once a look succeeds and lacks it.
+    stop_session(SID, probe, clock=clock, sleep=clock.sleep)
+    assert clock.now == 0.5 and answers == [None]
+    with pytest.raises(ResumeRefused, match="could not stop the session"):
+        stop_session(SID, probe, timeout=1.0, clock=clock, sleep=clock.sleep)

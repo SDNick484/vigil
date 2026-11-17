@@ -2,9 +2,11 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from vigil.config import load_config
 from vigil.index.db import connect
 from vigil.index.queries import SessionRow, get_session, list_sessions
 from vigil.index.scanner import link_chains, scan
+from vigil.resume import stop_session
 from vigil.serialize import open_link, session_to_dict
 from vigil.web.api import SessionOut
 from vigil.web.app import create_app
@@ -390,17 +393,22 @@ REMOTE_PEER = ("192.0.2.10", 50000)  # TEST-NET-1: never a real client
 TOKEN = "test-token-" + "0123456789abcdef" * 2  # a placeholder, not a real secret
 
 _LINKING_CLAUDE = """#!{python}
-import datetime, json, os, sys
+import datetime, json, os, sys, time
 with open({log!r}, "a") as handle:
     handle.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
 stopped = os.path.exists({marker!r})
 if "stop" in sys.argv:
+    time.sleep({stop_delay!r})
     if {stop_code!r} == 0:
         open({marker!r}, "w").close()
     sys.exit({stop_code!r})
 if "agents" in sys.argv:
+    if stopped and {agents_fail!r}:
+        sys.exit(1)
     sys.stdout.write("[]" if stopped else {live!r})
     sys.exit(0)
+if "--bg" in sys.argv and {bg_code!r}:
+    sys.exit({bg_code!r})
 if "--bg" in sys.argv and {link!r}:
     record = {{"type": "system", "subtype": "bridge_status", "url": {link!r},
               "timestamp": datetime.datetime.now(datetime.UTC).isoformat()}}
@@ -417,11 +425,15 @@ def install_claude(
     link: str | None,
     live: Sequence[Mapping[str, object]] | None = None,
     stop_code: int = 0,
+    stop_delay: float = 0.0,
+    agents_fail: bool = False,
+    bg_code: int = 0,
 ) -> None:
-    """A fake `claude` that reports `live` for `agents --json` (nothing once `stop` has run, which
-    exits `stop_code`) and, when started with `--bg`,
+    """A fake `claude` that reports `live` for `agents --json` and, when started with `--bg`,
     appends a `bridge_status` line with `link` to `transcript` (as Claude Code would once Remote
-    Control is up). It records its argv and cwd like every FakeBin program."""
+    Control is up). `stop` removes the session from `live` (and exits `stop_code`, after
+    `stop_delay` seconds); once stopped, `agents_fail` makes listing fail; `--bg` exits `bg_code`.
+    It records its argv and cwd like every FakeBin program."""
     env.bin.install("claude", stdout=CLAUDE_BG)
     script = env.bin.directory / "claude"
     script.write_text(
@@ -431,6 +443,9 @@ def install_claude(
             live=json.dumps(live or []),
             marker=str(env.bin.directory / ".stopped"),
             stop_code=stop_code,
+            stop_delay=stop_delay,
+            agents_fail=agents_fail,
+            bg_code=bg_code,
             link=link,
             transcript=str(transcript),
             help=CLAUDE_BG,
@@ -643,6 +658,89 @@ def test_restart_starts_nothing_when_the_stop_fails(
     assert response.status_code == 409
     assert response.json()["reason"] == "could not stop the session; nothing was restarted"
     assert started(vigil_env) == []
+
+
+def test_restart_plans_before_it_stops(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path))
+    web = remote_client.app.state.vigil  # type: ignore[attr-defined]
+    good = web.config
+    url = f"/sessions/{NAMED}/restart-remote"
+    # Nothing that would stop the start afterwards is allowed to get as far as the stop.
+    web.config = replace(good, resume=replace(good.resume, default_flags=("--bogus",)))
+    response = remote_client.post(url, data={"confirm": "yes"})
+    assert response.status_code == 409 and "flag not allowed" in response.json()["reason"]
+    web.config = replace(good, resume=replace(good.resume, launcher="tmux"))  # no tmux on PATH
+    response = remote_client.post(url, data={"confirm": "yes"})
+    assert response.status_code == 409 and "tmux" in response.json()["reason"]
+    gone = tmp_path / "gone"
+    sql(vigil_env, "UPDATE sessions SET cwd = ? WHERE session_id = ?", str(gone), NAMED)
+    web.config = good
+    response = remote_client.post(url, data={"confirm": "yes"})
+    assert response.status_code == 409 and "folder no longer exists" in response.json()["reason"]
+    assert claude_calls(vigil_env) == []  # not stopped, not started
+
+
+def test_restart_says_so_when_it_stopped_but_could_not_start(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(
+        vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path), bg_code=1
+    )
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 409
+    assert response.json()["reason"].startswith("stopped, but could not start it again: ")
+    assert response.json()["restartable"] is False
+    assert [argv[0] for argv in claude_calls(vigil_env)] == ["stop", "--bg"]
+
+
+def test_restart_unknown_live_state_is_not_gone(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(
+        vigil_env,
+        transcript=transcript,
+        link=LINK,
+        live=background_live(tmp_path),
+        agents_fail=True,  # once stopped, `claude agents --json` fails
+    )
+    # Do not wait the real 10 s for the stop to be given up on.
+    monkeypatch.setattr("vigil.web.api.stop_session", partial(stop_session, timeout=0.6, poll=0.1))
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 409
+    assert response.json()["reason"] == "could not stop the session; nothing was restarted"
+    assert started(vigil_env) == []
+
+
+def test_concurrent_restarts_launch_once(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(
+        vigil_env,
+        transcript=transcript,
+        link=LINK,
+        live=background_live(tmp_path),
+        stop_delay=0.5,  # long enough for the other request to get as far as its own stop
+    )
+    answers: list[int] = []
+
+    def restart() -> None:
+        response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+        answers.append(response.status_code)
+
+    threads = [threading.Thread(target=restart) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(answers) == [200, 409]
+    assert started(vigil_env) == [["--bg", "--resume", NAMED, "--remote-control"]]
+    assert [argv[0] for argv in claude_calls(vigil_env)].count("stop") == 1
 
 
 def test_restart_at_the_desk_opens_a_terminal(

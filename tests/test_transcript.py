@@ -271,6 +271,8 @@ def test_command_first_prompt_replaced_across_incremental_parses(tmp_path: Path)
     second = parse_transcript(path, first.end_offset, first.facts)
     assert second.facts == parse_transcript(path).facts
     assert second.facts.first_prompt == "Please work the issue queue"
+
+
 def test_bridge_status_newest_valid_url() -> None:
     facts = parse_transcript(REMOTE).facts
     assert facts.remote_url == "https://claude.ai/code/session_PLACEHOLDER02"

@@ -852,3 +852,44 @@ def test_peer_row_shows_open_only_from_open_url(machines: Machines) -> None:
     )
     machines.hub.forget("peer-c")
     assert link in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text
+
+
+def test_peer_busy_is_read_as_a_bool() -> None:
+    for value, expected in (
+        (True, True),
+        (False, False),
+        ("yes", False),
+        (1, False),
+        (None, False),
+    ):
+        session = session_from_dict(canned_session(busy=value), "peer-c")
+        assert session is not None and session.busy is expected
+    session = session_from_dict(canned_session(), "peer-c")
+    assert session is not None and session.busy is False
+    # What a stale peer last sent says nothing about now.
+    session = session_from_dict(canned_session(busy=True), "peer-c", stale=True)
+    assert session is not None and session.busy is False
+    assert session_from_dict(canned_session(busy=True), "peer-c") is not None
+    busy = session_from_dict(canned_session(busy=True), "peer-c")
+    assert busy is not None and session_to_dict(busy)["busy"] is True
+
+
+def test_peer_row_shows_the_busy_warning_from_the_owner(machines: Machines) -> None:
+    answer = canned_session(status="background", busy=True)
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[answer])
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    row_id = f"peer-peer-c-{C_SESSION}"
+    busy_copy = "This session is working right now. Restarting stops it mid-task."
+    machines.hub.forget("peer-c")
+    page = machines.laptop.get("/").text
+    row = row_html(page, row_id)
+    assert f'action="/peers/peer-c/sessions/{C_SESSION}/restart-remote"' in row
+    assert busy_copy in row
+    machines.hub.forget("peer-c")
+    assert busy_copy in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text
+    answer["busy"] = False
+    machines.hub.forget("peer-c")
+    assert busy_copy not in row_html(machines.laptop.get("/").text, row_id)

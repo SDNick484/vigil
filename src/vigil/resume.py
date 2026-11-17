@@ -39,6 +39,17 @@ soon as the session is started; on a timeout the session is left running and the
 opened anyway."""
 
 
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def session_lock(session_id: str) -> threading.Lock:
+    """The lock for `session_id`: hold it from looking at whether the session is live until what
+    was decided is done, so two requests cannot both launch (or stop and relaunch) one session."""
+    with _locks_guard:
+        return _locks.setdefault(session_id, threading.Lock())
+
+
 _STOP_TIMEOUT = 20.0
 """How long `stop_session` waits for `claude stop` to return."""
 
@@ -328,7 +339,7 @@ def execute(plan: ResumePlan, *, conn: sqlite3.Connection | None = None) -> str:
 
 def stop_session(
     session_id: str,
-    live_probe: Callable[[], dict[str, LiveSession]],
+    live_probe: Callable[[], dict[str, LiveSession] | None],
     *,
     timeout: float = 10.0,
     poll: float = 0.5,
@@ -336,7 +347,8 @@ def stop_session(
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Stop the background session `session_id` with `claude stop`, then wait (up to `timeout`
-    seconds, looking every `poll`) until `live_probe` no longer lists it.
+    seconds, looking every `poll`) until `live_probe` no longer lists it. A probe that returns None
+    (the live sessions could not be listed) counts as the session still being there.
 
     This is the one place vigil stops anything, and only for Restart with Remote Control, after the
     author confirmed. Raises ResumeRefused when `claude stop` cannot be run, is too slow or exits
@@ -361,7 +373,7 @@ def stop_session(
         log.warning("`%s` exited with %s", shlex.join(argv), result.returncode)
         raise refused
     deadline = clock() + timeout
-    while session_id in live_probe():
+    while (live := live_probe()) is None or session_id in live:
         remaining = deadline - clock()
         if remaining <= 0:
             raise refused

@@ -136,17 +136,23 @@ def _parse_entry(entry: Any) -> LiveSession | None:
     )
 
 
-def parse_live_sessions(text: str) -> dict[str, LiveSession]:
-    """Parse `claude agents --json` output. Anything unexpected yields an empty dict or skips
-    the bad entry."""
+def _parse_live(text: str) -> dict[str, LiveSession] | None:
+    """The sessions in `claude agents --json` output (skipping bad entries), or None when the
+    output is not a list at all."""
     try:
         data = json.loads(text)
     except ValueError:
-        return {}
+        return None
     if not isinstance(data, list):
-        return {}
+        return None
     sessions = (_parse_entry(entry) for entry in data)
     return {s.session_id: s for s in sessions if s is not None}
+
+
+def parse_live_sessions(text: str) -> dict[str, LiveSession]:
+    """Parse `claude agents --json` output. Anything unexpected yields an empty dict or skips
+    the bad entry."""
+    return _parse_live(text) or {}
 
 
 def live_sessions(caps: Capabilities, claude: str = "claude") -> dict[str, LiveSession]:
@@ -156,3 +162,15 @@ def live_sessions(caps: Capabilities, claude: str = "claude") -> dict[str, LiveS
         return {}
     out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
     return parse_live_sessions(out) if out is not None else {}
+
+
+def live_sessions_or_none(
+    caps: Capabilities, claude: str = "claude"
+) -> dict[str, LiveSession] | None:
+    """As `live_sessions`, but None, not an empty dict, when the sessions could not be listed
+    (`claude agents --json` unavailable, failing, slow or printing something unparseable), so a
+    caller that must know a session has gone is not told so by a failed look."""
+    if not caps.has_agents_json:
+        return None
+    out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
+    return _parse_live(out) if out is not None else None
