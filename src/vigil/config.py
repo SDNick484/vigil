@@ -1,5 +1,7 @@
 """Configuration: a TOML file validated by hand, with every key optional."""
 
+import ipaddress
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,11 +35,24 @@ class UsageConfig:
 
 
 @dataclass(frozen=True)
+class ServerConfig:
+    bind: str = "127.0.0.1"
+    """The address `vigil serve` listens on: an IP address. Anything but 127.0.0.1 needs
+    `token_file` (checked when the service starts, `vigil.web.security.check_bind_address`)."""
+    token_file: Path | None = None
+    """A file holding the access token for remote clients; it must be mode 0600 (or 0400)."""
+    allowed_hosts: tuple[str, ...] = ()
+    """Host names (lowercase, no port; IPv6 in brackets) remote clients may use in `Host`, on
+    top of the loopback names and the bind address."""
+
+
+@dataclass(frozen=True)
 class Config:
     claude_home: Path = field(default_factory=lambda: Path.home() / ".claude")
     port: int = 7787
     resume: ResumeConfig = field(default_factory=ResumeConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -117,11 +132,63 @@ def _parse_usage(raw: dict[str, Any]) -> UsageConfig:
     )
 
 
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOST_NAME = re.compile(rf"{_HOST_LABEL}(?:\.{_HOST_LABEL})*")
+
+
+def _allowed_host(value: str) -> str:
+    """A `server.allowed_hosts` entry, lowercased: a DNS name, an IPv4 address or a bracketed
+    IPv6 address, without a port, scheme or wildcard."""
+    host = value.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        try:
+            ipaddress.IPv6Address(host[1:-1])
+        except ValueError:
+            pass
+        else:
+            return host
+    elif len(host) <= 253 and _HOST_NAME.fullmatch(host):
+        return host
+    raise ConfigError(
+        f"server.allowed_hosts: not a host name: {value!r} "
+        "(give a name or address without scheme or port; IPv6 in brackets)"
+    )
+
+
+def _parse_server(raw: dict[str, Any]) -> ServerConfig:
+    table = _table(raw, "server")
+    _check_keys(table, {"bind", "token_file", "allowed_hosts"}, "server")
+    defaults = ServerConfig()
+    bind = defaults.bind
+    if "bind" in table:
+        bind = table["bind"]
+        if not isinstance(bind, str):
+            raise ConfigError("`server.bind` must be a string")
+        try:
+            ipaddress.ip_address(bind)
+        except ValueError:
+            raise ConfigError(f"`server.bind` must be an IP address, not {bind!r}") from None
+    token_file = defaults.token_file
+    if "token_file" in table:
+        if not isinstance(table["token_file"], str) or not table["token_file"].strip():
+            raise ConfigError("`server.token_file` must be a path")
+        token_file = Path(table["token_file"]).expanduser()
+        if not token_file.is_absolute():
+            raise ConfigError("`server.token_file` must be an absolute path (or start with ~)")
+    allowed_hosts = defaults.allowed_hosts
+    if "allowed_hosts" in table:
+        names = _string_list(table["allowed_hosts"], "server.allowed_hosts")
+        allowed_hosts = tuple(_allowed_host(name) for name in names)
+        if allowed_hosts and token_file is None:
+            raise ConfigError("`server.allowed_hosts` needs `server.token_file`")
+    return ServerConfig(bind=bind, token_file=token_file, allowed_hosts=allowed_hosts)
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load the config file; a missing file gives the defaults.
 
-    Raises ConfigError on unreadable or malformed TOML, unknown keys, wrong types, or a
-    default flag outside the allow-list.
+    Raises ConfigError on unreadable or malformed TOML, unknown keys, wrong types, a default
+    flag outside the allow-list, or a `server` value that is not an address, path or host name.
     """
     path = path if path is not None else config_path()
     try:
@@ -132,7 +199,7 @@ def load_config(path: Path | None = None) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"cannot read config {path}: {error}") from error
 
-    _check_keys(raw, {"claude_home", "port", "resume", "usage"}, "")
+    _check_keys(raw, {"claude_home", "port", "resume", "usage", "server"}, "")
     defaults = Config()
     claude_home = defaults.claude_home
     if "claude_home" in raw:
@@ -149,4 +216,5 @@ def load_config(path: Path | None = None) -> Config:
         port=port,
         resume=_parse_resume(raw),
         usage=_parse_usage(raw),
+        server=_parse_server(raw),
     )

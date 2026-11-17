@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import threading
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -33,6 +34,12 @@ _START_TIMEOUT = 20.0
 """How long `execute` waits for `claude --bg` / `tmux new-session -d` to return. Both return as
 soon as the session is started; on a timeout the session is left running and the terminal is
 opened anyway."""
+
+
+TERMINAL_ALLOWED: ContextVar[bool] = ContextVar("vigil_terminal_allowed", default=True)
+"""Whether `plan_resume` may plan a terminal. The web service's guard sets it to False for the
+length of a request from another machine (`vigil.web.security`): a terminal opened on this
+machine's screen is of no use to that user, so they get the attach command instead."""
 
 
 class ResumeRefused(Exception):
@@ -143,7 +150,8 @@ def plan_resume(
 
     Raises ResumeRefused when the session is open in an ordinary terminal, its folder is gone,
     neither `claude --bg` nor tmux is available, `claude` is not on PATH, or the config is bad.
-    A session already running in the background is attached to, never started again.
+    A session already running in the background is attached to, never started again. The plan
+    has no terminal while `TERMINAL_ALLOWED` is False.
     """
     session_id = session.session_id
     if not _SESSION_ID.fullmatch(session_id):
@@ -170,10 +178,12 @@ def plan_resume(
             start += ["claude", "--resume", session_id, *flags]
             attach = ["tmux", "attach", "-t", name]
 
-    try:
-        terminal = terminal_argv(attach, cwd, cfg, env)
-    except ValueError as error:
-        raise ResumeRefused(f"resume.terminal_command is not usable: {error}") from error
+    terminal: list[str] | None = None
+    if TERMINAL_ALLOWED.get():
+        try:
+            terminal = terminal_argv(attach, cwd, cfg, env)
+        except ValueError as error:
+            raise ResumeRefused(f"resume.terminal_command is not usable: {error}") from error
     return ResumePlan(
         start=start,
         start_cwd=cwd,

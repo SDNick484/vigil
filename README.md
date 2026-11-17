@@ -69,6 +69,9 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `usage.shell_history` | `false` | Read your shell history to see how you launch `claude`. Off unless you turn it on. |
 | `usage.history_files` | `[]` | History files to read. Empty means the default bash, zsh and fish locations. A leading `~` is expanded. |
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |
+| `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs `server.token_file`; see [Remote access](#remote-access). |
+| `server.token_file` | unset | File holding the access token, which turns remote access on. Must be an absolute path (a leading `~` is expanded) to a file you own with mode 0600 (0400 is fine too). |
+| `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs `server.token_file`. |
 
 Example:
 
@@ -156,6 +159,64 @@ header themselves:
 
 While it runs, the service watches `~/.claude/projects` and indexes changed transcripts within a
 second or two, with a full rescan every 10 minutes as a safety net.
+
+## Remote access
+
+By default vigil only listens on `127.0.0.1` and needs no login. To reach it from your other
+devices (over Tailscale, say), give it an access token and an address to listen on. Without a
+token, `vigil serve` refuses any address but `127.0.0.1`, and a request relayed by a reverse proxy
+is refused (403).
+
+Make a token (32 characters or more, printable ASCII, no spaces) in a file only you can read:
+
+    (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/.config/vigil/token)
+
+Then, in the config file (the address and name are examples; use your machine's):
+
+    [server]
+    bind = "100.64.0.1"
+    token_file = "~/.config/vigil/token"
+    allowed_hosts = ["mymachine.example-tailnet.ts.net"]
+
+`vigil serve` checks the token file when it starts and stops with an error if it is missing,
+readable by anyone else, or holds no usable token. It reads the token once, so restart the
+service after changing it. `bind = "0.0.0.0"` (or `"::"`) listens on every interface.
+
+**Local and remote requests.** vigil decides who is asking from the address the connection
+really comes from, never from headers a client can write. A request is local when it comes from a
+loopback address, names a loopback host (`127.0.0.1`, `localhost`, `[::1]`) and carries no proxy
+headers (`Forwarded`, `X-Forwarded-*`, `X-Real-IP` and similar). Local requests work exactly as
+without remote access: no token, and a POST needs a same-origin `Origin`. Everything else is
+remote, and needs the token. Remote requests may use the loopback names, `server.allowed_hosts`
+and the bind address (unless it is `0.0.0.0` or `::`) as `Host`; any other host gets 400, which
+keeps the DNS rebinding defence.
+
+**Scripts and other tools** send the token with every request, and need no `Origin` header:
+
+    curl -H "Authorization: Bearer $(cat ~/.config/vigil/token)" http://100.64.0.1:7787/api/v1/sessions
+
+**Browsers** are sent to `/login`, where you paste the token once. vigil then sets a session
+cookie (`vigil_session`) that lasts 30 days: HttpOnly, SameSite=Strict, and Secure when the page
+came over HTTPS. Because it is SameSite=Strict, following a link to vigil from another site shows
+the login page; open vigil directly instead. A POST made with the cookie must still carry this
+service's own `Origin`, as vigil's pages do. **Log out** in the header clears the cookie. The
+cookie is signed with a random key that vigil creates in its data folder
+(`$XDG_DATA_HOME/vigil/session.key`, mode 0600); delete it, or change the token, to log every
+browser out.
+
+**Resume** from a remote request never opens a terminal on the machine running vigil; it starts
+the session and answers with the attach command (e.g. `claude attach <id>`) to run there, for
+instance over SSH.
+
+**Behind a reverse proxy** (nginx, Caddy and the like), point the proxy at
+`http://127.0.0.1:7787`, have it pass the original `Host` and add that name to
+`server.allowed_hosts`. vigil treats every request carrying proxy headers as remote, so the token
+is required even though the proxy connects from loopback. Make sure your proxy adds
+`X-Forwarded-For` (most do by default): a proxy that rewrites `Host` to a loopback name and adds
+no proxy headers is indistinguishable from a local client. A TLS proxy should also send
+`X-Forwarded-Proto: https`, so the cookie is marked Secure. vigil itself speaks plain HTTP: over
+Tailscale the connection is encrypted already; anywhere else, put an HTTPS proxy in front, or the
+token crosses the network in the clear.
 
 ## License
 

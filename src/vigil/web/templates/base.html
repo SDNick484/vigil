@@ -15,6 +15,7 @@
       <a href="/">Sessions</a>
       <a href="/usage">Usage</a>
       {# Add a nav link by appending one line here. #}
+      {% if request.scope.get("vigil.access") == "cookie" %}<form method="post" action="/logout"><button type="submit">Log out</button></form>{% endif %}
     </nav>
   </header>
   <main>
