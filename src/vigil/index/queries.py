@@ -278,3 +278,17 @@ def record_launch(
             "VALUES (?, ?, ?, ?, ?)",
             (to_db(at), source, subcommand, json.dumps(list(flags)), session_id),
         )
+
+
+def vigil_launch_flags(conn: sqlite3.Connection, session_id: str) -> list[str]:
+    """The flag names of the launches vigil itself made of `session_id`, de-duplicated, first seen
+    first. Shell-history launches carry no session id, so they never appear here."""
+    rows = conn.execute(
+        "SELECT flags FROM launches WHERE source = 'vigil' AND session_id = ? ORDER BY id",
+        (session_id,),
+    )
+    names: dict[str, None] = {}
+    for (flags,) in rows:
+        for name in json.loads(flags):
+            names[name] = None
+    return list(names)

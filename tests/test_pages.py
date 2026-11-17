@@ -1,6 +1,7 @@
 import re
 import sqlite3
 from html.parser import HTMLParser
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from markupsafe import escape
@@ -467,3 +468,19 @@ def test_restart_confirm_step_on_background_row_and_detail(web_client: TestClien
     page = web_client.get("/").text
     assert BUSY_COPY in row_html(page, f"row-{NAMED}")
     assert BUSY_COPY not in row_html(page, f"row-{FORKED}")
+
+
+def test_detail_shows_token_panel(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    usage = Path(__file__).parent / "fixtures" / "transcripts" / "handmade" / "usage.jsonl"
+    sql(
+        vigil_env, "UPDATE sessions SET transcript_path = ? WHERE session_id = ?", str(usage), NAMED
+    )
+    page = web_client.get(f"/sessions/{NAMED}").text
+    assert "<h2>Where the tokens went</h2>" in page
+    assert '<span class="tabular-nums">180</span>' in page  # total output tokens
+    assert "64%" in page  # cache hits: 4500 of 7018 input-side tokens
+    assert "Bash" in page and "40,000" in page  # the largest tool output
+
+    # No panel when the transcript cannot be read, or for a session without usage.
+    sql(vigil_env, "UPDATE sessions SET transcript_path = '/nonexistent.jsonl' WHERE 1")
+    assert "Where the tokens went" not in web_client.get(f"/sessions/{NAMED}").text

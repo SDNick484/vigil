@@ -196,3 +196,4 @@ details.project .only a { display: inline-flex; align-items: center; min-height:
 li.session .name a { display: inline-flex; align-items: center; min-height: 2.5rem; }
 form.search button { min-height: 2.5rem; }
 form.search label { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 2.5rem; }
+.tabular-nums { font-variant-numeric: tabular-nums; }

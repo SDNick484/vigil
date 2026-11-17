@@ -97,8 +97,9 @@ from vigil.index.scanner import scan  # noqa: E402
 FIXTURE_TRANSCRIPTS = Path(__file__).parent / "fixtures" / "transcripts"
 FIXTURE_PROJECT_DIR = "-home-user-src-fixture-repo"
 HANDMADE_PROJECT_DIR = "-home-user-src-broken-repo"
-SKIP_REMOTE_FIXTURE = shutil.ignore_patterns("remote-control.jsonl")
-"""For copying the hand-made transcripts: the Remote Control one is only for tests that name it."""
+SKIP_REMOTE_FIXTURE = shutil.ignore_patterns("remote-control.jsonl", "usage.jsonl")
+"""For copying the hand-made transcripts: the Remote Control and usage ones are only for tests that
+name them."""
 
 
 def install_fixture_transcripts(claude_home: Path) -> Path:
