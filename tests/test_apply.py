@@ -11,6 +11,7 @@ import pytest
 from tests.conftest import freeze_tree, thaw_tree
 from vigil.apply import (
     ApplyRefused,
+    _read,
     apply_change,
     diff_text,
     plan_change,
@@ -55,6 +56,10 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def absent(path: Path) -> str:
+    return sha(b"absent\0" + os.fsencode(path))
+
+
 def test_claude_md_appended(folder: Path, home: Path) -> None:
     existing = "# Project\n\nUse uv.\n\n\n"
     (folder / "CLAUDE.md").write_text(existing)
@@ -62,7 +67,9 @@ def test_claude_md_appended(folder: Path, home: Path) -> None:
     assert change.target == folder.resolve() / "CLAUDE.md"
     assert change.before == existing
     assert change.after == "# Project\n\nUse uv.\n\nRun the tests first.\n"
-    assert change.before_hash == sha(existing.encode())
+    assert change.before_hash == sha(
+        b"file\0" + os.fsencode(change.target) + b"\0" + existing.encode()
+    )
     assert change.skipped == []
     diff = diff_text(change)
     assert "+Run the tests first." in diff
@@ -78,7 +85,7 @@ def test_claude_md_appended(folder: Path, home: Path) -> None:
 def test_claude_md_created(folder: Path, home: Path) -> None:
     change = plan_change(file_card("project_claude_md", "\nRun the tests first.\n\n"), folder, home)
     assert change.before is None
-    assert change.before_hash == "absent"
+    assert change.before_hash == absent(folder / "CLAUDE.md")
     assert change.after == "Run the tests first.\n"
     assert "/dev/null" in diff_text(change)
     assert not (folder / "CLAUDE.md").exists()
@@ -154,6 +161,78 @@ def test_settings_permissions_allow_refused(
     assert key in refused.value.reason
 
 
+@pytest.mark.parametrize(
+    ("settings", "key"),
+    [
+        ({"permissions": {"deny": "WebFetch"}}, "permissions.deny"),
+        ({"permissions": {"deny": [{"hooks": 1}]}}, "permissions.deny"),
+        ({"permissions": {"ask": ["Bash(ls)", ""]}}, "permissions.ask"),
+        ({"permissions": {"ask": ["Bash(ls)\nrm"]}}, "permissions.ask"),
+        ({"permissions": ["WebFetch"]}, "permissions"),
+        ({"model": {"x": 1}}, "model"),
+        ({"model": ""}, "model"),
+        ({"model": "m" * 65}, "model"),
+        ({"model": 4}, "model"),
+        ({"effortLevel": "extreme"}, "effortLevel"),
+        ({"includeCoAuthoredBy": "yes"}, "includeCoAuthoredBy"),
+        ({"cleanupPeriodDays": 0}, "cleanupPeriodDays"),
+        ({"cleanupPeriodDays": True}, "cleanupPeriodDays"),
+        ({"cleanupPeriodDays": 1.5}, "cleanupPeriodDays"),
+        ({"autoCompactX": {"hooks": {}}}, "autoCompactX"),
+        ({"autoCompactX": [1]}, "autoCompactX"),
+    ],
+)
+def test_settings_value_rules(folder: Path, home: Path, settings: dict[str, Any], key: str) -> None:
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(file_card("project_settings", settings=settings), folder, home)
+    assert f"the settings key {key} must be" in refused.value.reason
+
+
+def test_settings_value_rules_allow(folder: Path, home: Path) -> None:
+    settings = {
+        "model": "claude-opus-4-1[1m]",
+        "effortLevel": "xhigh",
+        "permissions": {"deny": ["WebFetch"], "ask": ["Bash(git push:*)"]},
+        "includeCoAuthoredBy": False,
+        "cleanupPeriodDays": 30,
+        "autoCompactEnabled": True,
+        "autoCompactThreshold": 0.8,
+    }
+    change = plan_change(file_card("project_settings", settings=settings), folder, home)
+    assert json.loads(change.after) == settings
+
+
+def test_settings_existing_value_of_another_kind_refused(folder: Path, home: Path) -> None:
+    (folder / ".claude").mkdir()
+    existing = '{"permissions": {"deny": "WebFetch"}}\n'
+    (folder / ".claude" / "settings.json").write_text(existing)
+    suggestion = file_card("project_settings", settings={"permissions": {"deny": ["Bash(rm:*)"]}})
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(suggestion, folder, home)
+    assert "permissions.deny" in refused.value.reason
+    (folder / ".claude" / "settings.json").write_text('{"permissions": true}\n')
+    with pytest.raises(ApplyRefused):
+        plan_change(suggestion, folder, home)
+
+
+@pytest.mark.parametrize(
+    "suggestion",
+    [
+        file_card("project_claude_md", "Run the tests\u202e first."),
+        file_card("project_claude_md", "Run the tests first.\U000e0041\U000e0042"),
+        file_card("project_claude_md", "Private \ue000 use."),
+        file_card("project_settings", settings={"permissions": {"deny": ["Web\u202eFetch"]}}),
+        file_card("project_settings", settings={"model": "opus\U000e0041"}),
+        file_card("project_settings", settings={"autoCompact\U000e0041": True}),
+    ],
+)
+def test_invisible_characters_refused(folder: Path, home: Path, suggestion: Suggestion) -> None:
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(suggestion, folder, home)
+    assert "contains invisible or unassigned characters" in refused.value.reason
+    assert list(folder.iterdir()) == []
+
+
 @pytest.mark.parametrize("existing", ["{not json", "[1, 2]", ""])
 def test_settings_invalid_json_refused(folder: Path, home: Path, existing: str) -> None:
     (folder / ".claude").mkdir()
@@ -179,49 +258,99 @@ def test_user_targets_refused(folder: Path, home: Path) -> None:
             plan_change(suggestion, folder, home)
 
 
-def test_apply_refuses_symlink_out(folder: Path, home: Path, tmp_path: Path) -> None:
+LINK = "is a symbolic link; vigil does not write through links. Copy the text instead."
+
+
+def test_apply_refuses_symlinks(folder: Path, home: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "CLAUDE.md").write_text("elsewhere\n")
-    (folder / "CLAUDE.md").symlink_to(outside / "CLAUDE.md")
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "build.sh").write_text("#!/bin/sh\n")
+    (folder / "scripts" / "build.sh").chmod(0o755)
+    (folder / ".git").mkdir()
+    (folder / ".git" / "config").write_text("[core]\n")
+    (folder / "conf").mkdir()
+    (folder / "conf" / "settings.json").write_text("{}\n")
+    claude_md = folder / "CLAUDE.md"
+    # Out of the folder, dangling, and inside it: a link is never written through.
+    for link in (
+        outside / "CLAUDE.md",
+        outside / "missing.md",
+        Path("scripts") / "build.sh",
+        Path(".git") / "config",
+    ):
+        claude_md.symlink_to(link)
+        with pytest.raises(ApplyRefused) as refused:
+            plan_change(file_card("project_claude_md", "More."), folder, home)
+        assert refused.value.reason == f"CLAUDE.md {LINK}", link
+        claude_md.unlink()
+    # A `.claude` link, out of the folder or inside it; and a settings.json link.
+    for link in (outside, folder / "conf"):
+        (folder / ".claude").symlink_to(link, target_is_directory=True)
+        with pytest.raises(ApplyRefused) as refused:
+            plan_change(file_card("project_settings", settings={"model": "opus"}), folder, home)
+        assert refused.value.reason == f".claude {LINK}", link
+        (folder / ".claude").unlink()
+    (folder / ".claude").mkdir()
+    (folder / ".claude" / "settings.json").symlink_to(folder / "conf" / "settings.json")
     with pytest.raises(ApplyRefused) as refused:
-        plan_change(file_card("project_claude_md", "More."), folder, home)
-    assert "outside the project folder" in refused.value.reason
-
-    # A dangling link out is refused too.
-    (folder / "CLAUDE.md").unlink()
-    (folder / "CLAUDE.md").symlink_to(outside / "missing.md")
-    with pytest.raises(ApplyRefused):
-        plan_change(file_card("project_claude_md", "More."), folder, home)
-
-    # So is a `.claude` folder that is a link out (the settings file is missing there).
-    (folder / ".claude").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ApplyRefused):
         plan_change(file_card("project_settings", settings={"model": "opus"}), folder, home)
+    assert refused.value.reason == f".claude/settings.json {LINK}"
+
     assert (outside / "CLAUDE.md").read_text() == "elsewhere\n"
     assert sorted(p.name for p in outside.iterdir()) == ["CLAUDE.md"]
+    assert (folder / "scripts" / "build.sh").read_text() == "#!/bin/sh\n"
+    assert (folder / ".git" / "config").read_text() == "[core]\n"
+    assert (folder / "conf" / "settings.json").read_text() == "{}\n"
 
-    # A link that stays inside the project folder is followed: the file it leads to is written.
-    (folder / "CLAUDE.md").unlink()
-    (folder / "docs").mkdir()
-    (folder / "docs" / "AGENTS.md").write_text("Agents.\n")
-    (folder / "CLAUDE.md").symlink_to(Path("docs") / "AGENTS.md")
-    change = plan_change(file_card("project_claude_md", "More."), folder, home)
-    assert change.target == folder.resolve() / "docs" / "AGENTS.md"
-    apply_change(change, home)
-    assert (folder / "docs" / "AGENTS.md").read_text() == "Agents.\n\nMore.\n"
-    assert (folder / "CLAUDE.md").is_symlink()
-
-    # A file that became a link out after the preview is refused, though its content is the same.
-    (folder / "CLAUDE.md").unlink()
-    (folder / "CLAUDE.md").write_text("Same.\n")
+    # A file that became a link after the preview is refused, though its content is the same.
+    claude_md.write_text("Same.\n")
     change = plan_change(file_card("project_claude_md", "More."), folder, home)
     (outside / "same.md").write_text("Same.\n")
-    (folder / "CLAUDE.md").unlink()
-    (folder / "CLAUDE.md").symlink_to(outside / "same.md")
+    claude_md.unlink()
+    claude_md.symlink_to(outside / "same.md")
     with pytest.raises(ApplyRefused):
         apply_change(change, home)
     assert (outside / "same.md").read_text() == "Same.\n"
+    assert claude_md.is_symlink()
+
+
+def test_apply_refuses_executable(folder: Path, home: Path) -> None:
+    claude_md = folder / "CLAUDE.md"
+    claude_md.write_text("echo hi\n")
+    claude_md.chmod(0o744)
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(file_card("project_claude_md", "More."), folder, home)
+    assert "executable" in refused.value.reason
+    # Made executable after the preview.
+    claude_md.chmod(0o644)
+    change = plan_change(file_card("project_claude_md", "More."), folder, home)
+    claude_md.chmod(0o755)
+    with pytest.raises(ApplyRefused):
+        apply_change(change, home)
+    assert claude_md.read_text() == "echo hi\n"
+
+
+def test_apply_refuses_inside_git_folder(folder: Path, home: Path) -> None:
+    git = folder / ".git"
+    git.mkdir()
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(file_card("project_claude_md", "More."), git, home)
+    assert ".git" in refused.value.reason
+    assert list(git.iterdir()) == []
+
+
+def test_apply_refuses_fifo(folder: Path, home: Path) -> None:
+    claude_md = folder / "CLAUDE.md"
+    os.mkfifo(claude_md)
+    with pytest.raises(ApplyRefused) as refused:
+        plan_change(file_card("project_claude_md", "More."), folder, home)
+    assert "not a regular file" in refused.value.reason
+    # Reading checks the open file too, without waiting for a writer.
+    with pytest.raises(ApplyRefused):
+        _read(claude_md)
+    assert stat.S_ISFIFO(claude_md.lstat().st_mode)
 
 
 def test_apply_refuses_under_claude_home(tmp_path: Path) -> None:
@@ -250,8 +379,9 @@ def test_apply_refuses_under_claude_home(tmp_path: Path) -> None:
         project = tmp_path / "project"
         project.mkdir()
         (project / ".claude").symlink_to(home, target_is_directory=True)
-        with pytest.raises(ApplyRefused):
+        with pytest.raises(ApplyRefused) as refused:
             plan_change(file_card("project_settings", settings={"model": "opus"}), project, home)
+        assert refused.value.reason == f".claude {LINK}"
     finally:
         thaw_tree(home)
     assert (home / "settings.json").read_text() == '{"model": "sonnet"}\n'
@@ -271,7 +401,7 @@ def test_apply_creates_missing_dot_claude(folder: Path, home: Path) -> None:
     suggestion = file_card("project_settings", settings={"permissions": {"deny": ["WebFetch"]}})
     change = plan_change(suggestion, folder, home)
     assert change.before is None
-    assert change.before_hash == "absent"
+    assert change.before_hash == absent(folder / ".claude" / "settings.json")
     diff_text(change)
     assert not (folder / ".claude").exists()  # never at preview
 

@@ -21,6 +21,7 @@ from tests.test_api import (
 )
 from tests.test_review_runner import ANSWER, claude_result
 from tests.test_review_store import NUMBERS, insert
+from vigil.apply import file_hash
 from vigil.config import load_config
 from vigil.index.db import connect
 from vigil.index.scanner import scan
@@ -602,11 +603,12 @@ def test_show_change_then_apply(vigil_env: VigilEnv, web_client: TestClient, pro
     assert fragment.status_code == 200, fragment.text
     assert "+Run the tests &lt;first&gt;." in fragment.text
     assert f'hx-post="/reviews/{review_id}/suggestions/0/apply"' in fragment.text
-    assert before_hash(fragment.text) == "absent"
+    previewed = before_hash(fragment.text)
+    assert previewed == file_hash(project.resolve() / "CLAUDE.md", None)
     assert not (project / "CLAUDE.md").exists()  # a preview writes nothing
 
     response = web_client.post(
-        f"/reviews/{review_id}/suggestions/0/apply", data={"before_hash": "absent"}
+        f"/reviews/{review_id}/suggestions/0/apply", data={"before_hash": previewed}
     )
     assert response.status_code == 200, response.text
     target = project.resolve() / "CLAUDE.md"
@@ -654,27 +656,34 @@ def test_apply_hash_mismatch_409(
     assert response.json()["reason"].startswith("folder no longer exists")
 
 
-def test_user_target_copy_only(vigil_env: VigilEnv, web_client: TestClient, project: Path) -> None:
+def test_user_target_copy_only(
+    vigil_env: VigilEnv, web_client: TestClient, project: Path, tmp_path: Path
+) -> None:
     review_id = file_review(
         vigil_env,
         file_card("user_claude_md", "Be brief."),
         file_card("user_settings", settings={"model": "opus"}),
         file_card("project_settings", settings={"hooks": {"Stop": []}}),
+        file_card("project_claude_md", "Hidden\u202e text."),
+        file_card("project_claude_md", "More."),
     )
+    (tmp_path / "elsewhere.md").write_text("Elsewhere.\n")
+    (project / "CLAUDE.md").symlink_to(tmp_path / "elsewhere.md")
     freeze_tree(vigil_env.claude_home)
     try:
         page = web_client.get(f"/sessions/{NAMED}/reviews/{review_id}").text
-        for index in (0, 1, 2):
+        for index in (0, 1, 2, 3):
             assert f"/reviews/{review_id}/suggestions/{index}/change" not in page
             assert f"/reviews/{review_id}/suggestions/{index}/apply" not in page
         assert str(vigil_env.claude_home / "CLAUDE.md") in page
         assert str(vigil_env.claude_home / "settings.json") in page
         assert 'class="copy" data-copy="Be brief."' in page
         assert "&#34;model&#34;: &#34;opus&#34;" in page
-        assert "hooks.Stop" in page  # why the project card is copy-only
-        assert page.count(">Copy</button>") == 3
+        assert "settings key hooks" in page  # why the project card is copy-only
+        assert "contains invisible or unassigned characters" in page
+        assert page.count(">Copy</button>") == 4
 
-        for index in (0, 1, 2):
+        for index in (0, 1, 2, 3, 4):
             response = web_client.post(
                 f"/reviews/{review_id}/suggestions/{index}/apply", data={"before_hash": "absent"}
             )
@@ -683,6 +692,13 @@ def test_user_target_copy_only(vigil_env: VigilEnv, web_client: TestClient, proj
         fragment = web_client.get(f"/reviews/{review_id}/suggestions/0/change").text
         assert "data-copy" in fragment
         assert "before_hash" not in fragment
+        # A project card whose CLAUDE.md is a link: the preview is copy-only.
+        assert f'hx-get="/reviews/{review_id}/suggestions/4/change"' in page
+        fragment = web_client.get(f"/reviews/{review_id}/suggestions/4/change").text
+        assert "CLAUDE.md is a symbolic link; vigil does not write through links." in fragment
+        assert 'class="copy" data-copy="More."' in fragment
+        assert "before_hash" not in fragment
     finally:
         thaw_tree(vigil_env.claude_home)
     assert not (project / ".claude").exists()
+    assert (tmp_path / "elsewhere.md").read_text() == "Elsewhere.\n"

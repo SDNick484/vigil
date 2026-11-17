@@ -32,11 +32,10 @@ from pydantic import BaseModel
 
 from vigil.apply import (
     CHANGED,
-    USER_TARGET,
     ApplyRefused,
     Change,
     apply_change,
-    check_settings,
+    check_suggestion,
     diff_text,
     plan_change,
     project_folder,
@@ -190,23 +189,21 @@ class FileCard:
 
 
 def file_card(suggestion: Suggestion, request: Request) -> FileCard:
-    """The card of a file suggestion: copy-only for a user target (with its path under the
-    configured Claude home) and for settings with a key vigil does not apply."""
+    """The card of a file suggestion: copy-only, with the reason, when
+    `vigil.apply.check_suggestion` refuses it (a user target, shown with its path under the
+    configured Claude home; settings vigil does not apply; invisible characters)."""
     if suggestion.file_settings is not None:
         copy = json.dumps(suggestion.file_settings, indent=2, ensure_ascii=False)
     else:
         copy = suggestion.file_text or ""
     target = suggestion.file_target
     user = user_target_path(target, state(request).config.claude_home) if target else None
-    if user is not None or target is None:
-        return FileCard(str(user or ""), copy, USER_TARGET)
-    refused = None
-    if target == "project_settings":
-        try:
-            check_settings(suggestion.file_settings)
-        except ApplyRefused as error:
-            refused = error.reason
-    return FileCard(_PROJECT_FILES[target], copy, refused)
+    path = str(user) if user is not None else _PROJECT_FILES.get(target or "", "")
+    try:
+        check_suggestion(suggestion)
+    except ApplyRefused as error:
+        return FileCard(path, copy, error.reason)
+    return FileCard(path, copy, None)
 
 
 templates.env.globals["file_card"] = file_card
