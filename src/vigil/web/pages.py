@@ -15,8 +15,9 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from vigil.commands import resume_command
-from vigil.index.queries import SessionRow, chain, get_session, list_sessions
+from vigil.index.queries import SessionRow, chain, get_session, list_projects, list_sessions
 from vigil.serialize import apply_status, display_name
+from vigil.usage import build_report, refresh_sources
 from vigil.web import connection, state
 
 router = APIRouter(tags=["pages"])
@@ -125,6 +126,21 @@ def session_page(request: Request, session_id: str) -> Any:
         "command": resume_command(row),
     }
     return _render(request, "session_detail.html", context)
+
+
+@router.get("/usage", response_class=HTMLResponse)
+def usage_page(request: Request, project: Annotated[str, Query()] = "") -> Any:
+    """What you use inside sessions (optionally for one project), how you launch `claude`, and the
+    flags and subcommands of the installed version you have never tried."""
+    web = state(request)
+    with connection(request) as conn:
+        refresh_sources(conn, web.config)
+        report = build_report(
+            conn, project_key=project or None, history_enabled=web.config.usage.shell_history
+        )
+        projects = list_projects(conn)
+    context = {"report": report, "project": project, "projects": projects}
+    return _render(request, "usage.html", context)
 
 
 @router.get("/static/{path:path}")
