@@ -12,3 +12,4 @@ All notable changes to this project are recorded here, in the style of
 - Tolerant, incremental transcript parser (`vigil.transcript`) with sanitized real fixtures.
 - SQLite index with numbered migrations, incremental transcript scanner, project grouping by git remote, and session queries (`vigil.index`, `vigil.projects`).
 - Detect installed `claude` capabilities (`--bg`, `attach`, `agents --json`) and live sessions, with fixtures captured from Claude Code 2.1.312.
+- Feature catalog (`vigil.catalog`): flags and subcommands parsed from the installed `claude --help`, stored per Claude Code version (migration 0002).

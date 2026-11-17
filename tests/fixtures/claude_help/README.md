@@ -33,3 +33,9 @@ Fields seen: `pid`, `cwd`, `kind`, `startedAt`, `sessionId`, `name`, `status`.
   every other `kind` to background, and ignores `status`.
 - `name` is `null`/absent when the session has no name: assumed, not observed.
 - A completed session listed by `--all` is not captured; `live_sessions` does not pass `--all`.
+
+## Added for the feature catalog (Task 8)
+
+| File | Command | Notes |
+| --- | --- | --- |
+| `claude_attach_help.txt` | `claude attach --help` | Complete and unmodified (help output only, no session). A subcommand help with no `Options:` section; the catalog must cope with that. |
