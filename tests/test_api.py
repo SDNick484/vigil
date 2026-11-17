@@ -637,6 +637,27 @@ def test_restart_remote_returns_link(
     ]
 
 
+def test_restart_of_a_session_that_is_already_joinable_stops_nothing(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    # Another tab (or a stale page) restarted it already: it now has a link for its current run.
+    transcript = start_in(vigil_env, tmp_path)
+    began = datetime.now(UTC) - timedelta(minutes=10)
+    append_bridge(transcript, began + timedelta(minutes=1))
+    live = background_live(tmp_path, startedAt=int(began.timestamp() * 1000))
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=live)
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED}",
+        "opened_terminal": False,
+        "remote_url": LINK,
+        "pending": False,
+    }
+    assert claude_calls(vigil_env) == []  # not stopped, not started
+
+
 def test_restart_remote_is_pending_without_a_new_link(
     vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
 ) -> None:

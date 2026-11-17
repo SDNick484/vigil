@@ -430,7 +430,9 @@ def restart_remote(
     reason says so.
 
     After the stop it is the resume of a session that is not running: from another machine no
-    terminal is opened, and the answer is that of a resume (the link, or `pending`)."""
+    terminal is opened, and the answer is that of a resume (the link, or `pending`). A session
+    that can already be joined (restarted from another tab, say) is not stopped: the answer is
+    the resume answer with its link."""
     if confirm != "yes":
         return _refusal(400, "restarting needs confirm=yes")
     web = state(request)
@@ -441,6 +443,9 @@ def restart_remote(
         with session_lock(row.session_id):
             caps, live = web.live.get(fresh=True)
             running = live.get(row.session_id)
+            link = joinable_link(row, live) if running is not None else None
+            if link is not None:
+                return _resumed(f"claude attach {row.session_id}", None, link)
             if running is None or running.kind != "background":
                 return _refusal(
                     409,
@@ -463,12 +468,13 @@ def restart_remote(
 
 
 def _resumed(
-    attach: str, plan: ResumePlan, link: str | None, *, pending: bool = False
+    attach: str, plan: ResumePlan | None, link: str | None, *, pending: bool = False
 ) -> dict[str, object]:
+    """A resume's answer; `plan` is None when nothing was planned (no terminal was opened)."""
     return {
         "ok": True,
         "attach": attach,
-        "opened_terminal": plan.terminal is not None,
+        "opened_terminal": plan is not None and plan.terminal is not None,
         "remote_url": link,
         "pending": pending,
     }
