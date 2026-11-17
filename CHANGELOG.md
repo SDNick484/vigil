@@ -24,3 +24,6 @@ All notable changes to this project are recorded here, in the style of
 
 ### Changed
 - Install guide rewritten step by step: install without pipx (a virtual environment), checks after each step, which way to keep vigil running, upgrade, uninstall and troubleshooting; the service files also look for `claude` in `/opt/bin`.
+
+### Fixed
+- A session started with a local command such as `/model` (or a `!` bash-mode command) is named after the first typed prompt, and command output is no longer taken for a prompt.

@@ -22,7 +22,12 @@ What is read, as found in real Claude Code 2.1.312 transcripts (see tests/fixtur
 - A user *prompt* is a counted `user` record whose `promptSource` is not `"system"` (task
   notifications are system prompts) and whose content is a string or text blocks, not tool
   results. `first_prompt` is the first one, `last_user` the latest. A slash command prompt
-  (`<command-name>/greet</command-name>`) is shown as `/greet` plus any `<command-args>`.
+  (`<command-name>/greet</command-name>`) is shown as `/greet` plus any `<command-args>`, and a
+  bash-mode input (`<bash-input>ls</bash-input>`, typed as `!ls`) as `! ls`. Neither keeps the
+  `first_prompt` slot once a typed prompt follows, so a session started with `/model` is named
+  after what was asked next. The output of local commands and bash mode
+  (`<local-command-stdout>`, `<bash-stdout>` and their `stderr` forms) is recorded as `user`
+  records too; those are not prompts.
 - `last_assistant`: the latest non-empty `text` block of an assistant record.
 - Text fields (`title`, `first_prompt`, `last_user`, `last_assistant`) are cut to `TRUNCATE`
   characters.
@@ -62,6 +67,8 @@ FeatureKind = Literal[
 
 _COMMAND_NAME = re.compile(r"<command-name>\s*([^<]+?)\s*</command-name>")
 _COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+_BASH_INPUT = re.compile(r"<bash-input>(.*?)</bash-input>", re.DOTALL)
+_COMMAND_OUTPUT = re.compile(r"\s*<(?:local-command|bash)-(?:stdout|stderr)>")
 _SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
 
 
@@ -159,20 +166,35 @@ def _apply_user(facts: SessionFacts, record: dict[str, Any], content: Any) -> No
     if record.get("promptSource") == "system":
         return
     text = _prompt_text(content)
-    if text is None:
+    if text is None or _COMMAND_OUTPUT.match(text):
         return
     command = _COMMAND_NAME.search(text)
+    bash = _BASH_INPUT.search(text)
     if command is not None:
         name = command.group(1)
         facts.features["slash_command", name] += 1
         args = _COMMAND_ARGS.search(text)
         text = f"{name} {args.group(1).strip()}" if args and args.group(1).strip() else name
+    elif bash is not None:
+        text = f"! {bash.group(1).strip()}"
     if record.get("permissionMode") == "plan":
         facts.features["plan_mode", "plan"] += 1
     text = _clip(text)
-    if facts.first_prompt is None:
+    typed = command is None and bash is None
+    if facts.first_prompt is None or (typed and _is_command_prompt(facts, facts.first_prompt)):
         facts.first_prompt = text
     facts.last_user = text
+
+
+def _is_command_prompt(facts: SessionFacts, text: str) -> bool:
+    """Whether `text` came from a slash command or bash-mode input rather than a typed prompt.
+
+    Decided from what the facts already hold, so parsing in pieces gives the same answer.
+    """
+    if text.startswith("! "):
+        return True
+    words = text.split(maxsplit=1)
+    return bool(words) and ("slash_command", words[0]) in facts.features
 
 
 def _apply_assistant(facts: SessionFacts, model: str | None, content: Any) -> None:

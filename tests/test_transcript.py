@@ -192,3 +192,81 @@ def test_parse_at_end_of_file_changes_nothing() -> None:
     again = parse_transcript(PLAIN, full.end_offset, full.facts)
     assert again.facts == full.facts
     assert again.end_offset == full.end_offset
+
+
+def _interactive_session(tmp_path: Path, contents: list[tuple[str, bool]]) -> Path:
+    """A transcript of user records shaped like an interactive 2.1.312 session's.
+
+    Each item is `(content, is_meta)`; the records are written in order, one second apart.
+    """
+    lines = PLAIN.read_text().splitlines()
+    template = json.loads(next(line for line in lines if json.loads(line)["type"] == "user"))
+    records = []
+    for second, (content, is_meta) in enumerate(contents):
+        record = copy.deepcopy(template)
+        record["message"] = {"role": "user", "content": content}
+        record["timestamp"] = f"2026-11-17T10:00:{second:02d}.000Z"
+        record.pop("promptSource", None)
+        if is_meta:
+            record["isMeta"] = True
+        else:
+            record.pop("isMeta", None)
+        records.append(record)
+    path = tmp_path / PLAIN.name
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    return path
+
+
+LOCAL_MODEL = [
+    (
+        "<local-command-caveat>Caveat: the command below was run locally.</local-command-caveat>",
+        True,
+    ),
+    (
+        "<command-name>/model</command-name>\n"
+        "            <command-message>model</command-message>\n"
+        "            <command-args></command-args>",
+        False,
+    ),
+    ("<local-command-stdout>Set model to `Opus 5.5`</local-command-stdout>", False),
+]
+BASH_MODE = [
+    ("<bash-input>git status</bash-input>", False),
+    ("<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>", False),
+]
+
+
+def test_local_command_and_bash_mode_do_not_name_the_session(tmp_path: Path) -> None:
+    path = _interactive_session(
+        tmp_path, [*LOCAL_MODEL, *BASH_MODE, ("Please work the issue queue", False)]
+    )
+    facts = parse_transcript(path).facts
+    assert facts.first_prompt == "Please work the issue queue"
+    assert facts.last_user == "Please work the issue queue"
+    assert facts.features["slash_command", "/model"] == 1
+
+
+def test_command_output_is_not_a_prompt(tmp_path: Path) -> None:
+    facts = parse_transcript(_interactive_session(tmp_path, [*LOCAL_MODEL, *BASH_MODE])).facts
+    assert facts.first_prompt == "/model"  # nothing typed yet: the command is all there is
+    assert facts.last_user == "! git status"
+
+
+def test_typed_prompt_keeps_the_first_slot(tmp_path: Path) -> None:
+    path = _interactive_session(tmp_path, [("fix the bug", False), *LOCAL_MODEL, ("thanks", False)])
+    facts = parse_transcript(path).facts
+    assert facts.first_prompt == "fix the bug"
+    assert facts.last_user == "thanks"
+
+
+def test_command_first_prompt_replaced_across_incremental_parses(tmp_path: Path) -> None:
+    path = _interactive_session(tmp_path, [*LOCAL_MODEL, ("Please work the issue queue", False)])
+    data = path.read_bytes()
+    cut = data.rfind(b"\n", 0, len(data) - 1) + 1  # just before the typed prompt
+    path.write_bytes(data[:cut])
+    first = parse_transcript(path)
+    assert first.facts.first_prompt == "/model"
+    path.write_bytes(data)
+    second = parse_transcript(path, first.end_offset, first.facts)
+    assert second.facts == parse_transcript(path).facts
+    assert second.facts.first_prompt == "Please work the issue queue"
