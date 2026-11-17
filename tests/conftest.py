@@ -85,3 +85,36 @@ def fake_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBin:
     directory.mkdir()
     monkeypatch.setenv("PATH", str(directory))
     return FakeBin(directory)
+
+
+# Imported here rather than at the top so this file stays append-only.
+import shutil  # noqa: E402
+import sqlite3  # noqa: E402
+
+from vigil.index.db import connect  # noqa: E402
+from vigil.index.scanner import scan  # noqa: E402
+
+FIXTURE_TRANSCRIPTS = Path(__file__).parent / "fixtures" / "transcripts"
+FIXTURE_PROJECT_DIR = "-home-user-src-fixture-repo"
+HANDMADE_PROJECT_DIR = "-home-user-src-broken-repo"
+
+
+def install_fixture_transcripts(claude_home: Path) -> Path:
+    """Copy the fixture transcripts into `claude_home/projects/` in Claude Code's layout (the
+    real ones, with their subagent folder, in one project folder; the hand-made one in another).
+    Returns the `projects` folder."""
+    projects = claude_home / "projects"
+    shutil.copytree(FIXTURE_TRANSCRIPTS / "2.1.312", projects / FIXTURE_PROJECT_DIR)
+    shutil.copytree(FIXTURE_TRANSCRIPTS / "handmade", projects / HANDMADE_PROJECT_DIR)
+    return projects
+
+
+@pytest.fixture
+def index_db(tmp_path: Path, claude_home: Path) -> Iterator[sqlite3.Connection]:
+    """An index at `tmp_path/data/index.db` built by scanning the fixture transcripts, which are
+    installed in the `claude_home` fixture (left writable; call freeze_tree() to lock it)."""
+    install_fixture_transcripts(claude_home)
+    conn = connect(tmp_path / "data" / "index.db")
+    scan(conn, claude_home)
+    yield conn
+    conn.close()
