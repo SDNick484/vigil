@@ -130,3 +130,32 @@ def proc_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path.write_text("Linux version 6.0.0 (builder@example) (gcc) #1 SMP\n")
     monkeypatch.setattr(vigil.terminal, "PROC_VERSION", path)
     return path
+
+
+@dataclass(frozen=True)
+class VigilEnv:
+    """A CLI run's whole world, all under tmp: HOME, XDG dirs, a config pointing at `claude_home`
+    (holding the fixture transcripts) and fakes on PATH."""
+
+    claude_home: Path
+    index: Path
+    bin: FakeBin
+
+
+@pytest.fixture
+def vigil_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claude_home: Path, fake_bin: FakeBin
+) -> VigilEnv:
+    """Isolate a CLI run from the real config, data folder and `~/.claude`. No `claude` is on PATH
+    until a test installs a fake; there is no display, so no terminal is found."""
+    install_fixture_transcripts(claude_home)
+    config_home = tmp_path / "xdg_config"
+    data_home = tmp_path / "xdg_data"
+    (config_home / "vigil").mkdir(parents=True)
+    (config_home / "vigil" / "config.toml").write_text(f'claude_home = "{claude_home}"\n')
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    for name in ("DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME", "TERMINAL"):
+        monkeypatch.delenv(name, raising=False)
+    return VigilEnv(claude_home, data_home / "vigil" / "index.db", fake_bin)

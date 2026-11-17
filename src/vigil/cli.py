@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from importlib import import_module
 from typing import Protocol
 
 import vigil
@@ -19,6 +20,10 @@ class Command(Protocol):
 
 # Append point: later tasks register a command by appending one line here.
 COMMANDS: list[Command] = []
+COMMANDS.append(import_module("vigil.commands.scan").COMMAND)
+COMMANDS.append(import_module("vigil.commands.ls").COMMAND)
+COMMANDS.append(import_module("vigil.commands.show").COMMAND)
+COMMANDS.append(import_module("vigil.commands.resume").COMMAND)
 
 
 def build_parser() -> argparse.ArgumentParser:
