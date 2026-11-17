@@ -19,6 +19,7 @@ from fastapi import Request
 
 from vigil.claude_cli import Capabilities, LiveSession, capabilities, live_sessions
 from vigil.config import Config
+from vigil.peers import PeerHub
 
 LIVE_TTL = 5.0
 """How long (seconds) live-session status is reused before `claude agents --json` runs again."""
@@ -62,6 +63,8 @@ class WebState:
     """When the service's watcher last finished a scan; None until it has."""
     watcher_ready: threading.Event = field(default_factory=threading.Event)
     """Set once the watcher is watching: a transcript change after this is picked up."""
+    peers: PeerHub = field(default_factory=lambda: PeerHub(()))
+    """The configured peers (v2) and their latest sessions."""
 
 
 def state(request: Request) -> WebState:

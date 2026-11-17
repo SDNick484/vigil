@@ -17,6 +17,10 @@
     {{ count }} session{{ "" if count == 1 else "s" }}
     {%- if project %}, in one project (<a href="/">show all</a>){% endif %}
   </p>
+  {% for name, fetched_at, error in offline %}
+  <p class="result refused peer-offline">{{ name }} cannot be reached ({{ error }}).
+    {% if fetched_at %}Its sessions as of {{ fetched_at|when }} are shown, marked stale.{% else %}None of its sessions are known yet.{% endif %}</p>
+  {% endfor %}
   {% for group in groups %}
   <section class="project">
     <h2><a href="/?project={{ group.key|urlencode }}">{{ group.label }}</a>
@@ -28,7 +32,7 @@
           <th>Branch</th>
           <th>Last activity</th>
           <th>Status</th>
-          {# Machine column (v2 peers): add <th>Machine</th> here and a <td> in _session_row.html. #}
+          {% if machines %}<th>Machine</th>{% endif %}
           <th></th>
         </tr>
       </thead>

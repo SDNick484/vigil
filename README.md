@@ -72,6 +72,11 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs `server.token_file`; see [Remote access](#remote-access). |
 | `server.token_file` | unset | File holding the access token, which turns remote access on. Must be an absolute path (a leading `~` is expanded) to a file you own with mode 0600 (0400 is fine too). |
 | `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs `server.token_file`. |
+| `machine` | host name | What the machine column calls this machine when [peers](#peers) are listed. 1 to 63 printable characters. |
+| `peers` | `[]` | Other machines' vigil services whose sessions this one lists, as `[[peers]]` tables; see [Peers](#peers). |
+| `peers[].name` | required | The peer's name in the machine column and in URLs: 1 to 63 letters, digits, `-` and `_`. Unique, and not the same as `machine`. |
+| `peers[].url` | required | The peer's vigil, `http(s)://host[:port]` with no path, e.g. `"http://desktop.example-tailnet.ts.net:7787"`. |
+| `peers[].token_file` | required | File holding that peer's access token (its own `server.token_file` token). Same rules: an absolute path (a leading `~` is expanded) to a file you own with mode 0600 or 0400. |
 
 Example:
 
@@ -108,6 +113,7 @@ reference is at `/docs` while the service runs.
 | `GET /api/v1/sessions/{id}` | One session plus `chain` (every session of its resume chain, oldest first) and `resume_command`. `{id}` may also be a unique id prefix or the session's exact title. 404 if nothing matches. |
 | `GET /api/v1/projects` | Projects: `project_key`, `label`, `session_count`, `last_activity_at`. |
 | `GET /api/v1/health` | `status` (`"ok"`), `version` (vigil's), `claude_version` (null when `claude` is not found), `indexed_sessions`, `last_scan_at` (null until the service has scanned). |
+| `GET /api/v1/peers` | The configured [peers](#peers): `name`, `url`, `fetched_at`, `stale` (it could not be reached), `error` (why), `session_count`. Their sessions are not in `/api/v1/sessions`, which lists this machine's only. |
 
 `GET /api/v1/sessions` takes these query parameters, all optional:
 
@@ -148,6 +154,9 @@ pages:
 - `POST /sessions/{id}/meta` sets vigil's own `label`, `note`, `pinned` and `archived` from form
   fields and returns the updated session. Only the fields sent change; an empty `label` or `note`
   clears it.
+- `POST /peers/{name}/sessions/{id}/resume` resumes a session of a [peer](#peers) on that peer, and
+  answers like the resume above plus `"machine": "<name>"`. The peer's own 404 and 409 come back
+  with its reason; 502 when the peer cannot be reached or refuses the request.
 
 The service only answers requests whose `Host` is `127.0.0.1`, `localhost` or `[::1]` (400
 otherwise), which stops other web sites reaching it through DNS rebinding. A POST must carry an
@@ -217,6 +226,46 @@ no proxy headers is indistinguishable from a local client. A TLS proxy should al
 `X-Forwarded-Proto: https`, so the cookie is marked Secure. vigil itself speaks plain HTTP: over
 Tailscale the connection is encrypted already; anywhere else, put an HTTPS proxy in front, or the
 token crosses the network in the clear.
+
+## Peers
+
+With vigil on several machines, one of them can list every machine's sessions in one place. Turn
+on [remote access](#remote-access) on each machine to be listed (a token and an address the
+others can reach, with that address or name in its `server.allowed_hosts`), then tell the
+machine you browse from about them:
+
+    machine = "laptop"
+
+    [[peers]]
+    name = "desktop"
+    url = "http://desktop.example-tailnet.ts.net:7787"
+    token_file = "~/.config/vigil/desktop.token"
+
+Copy each peer's token into its own file on this machine, readable by you only
+(`chmod 600`). The sessions page then shows a **Machine** column: this machine's sessions under
+`machine` (or its host name), each peer's under the peer's `name`. Search, the project filter and
+"include archived" apply to every machine. A peer's session opens a detail page here, built from
+what the peer sent; its label and note are edited on the peer itself.
+
+- **Fetching.** vigil asks each peer for its sessions (`GET /api/v1/sessions`) when a page lists
+  them, all peers at once, and reuses the answer for 10 seconds. Connecting to a peer, and waiting for it to answer,
+  each time out after 3 seconds.
+- **Offline peers.** The last sessions fetched from each peer are kept in the data folder
+  (`$XDG_DATA_HOME/vigil/peers/<name>.json`, mode 0600; it holds no token). When a peer cannot be
+  reached, its last-known sessions are shown marked **stale**, with the reason and when they were
+  fetched, and it is tried again after 30 seconds.
+- **Resume** on a peer's session is forwarded to that peer (`POST /sessions/{id}/resume` with its
+  token), which starts the session there. Since the request comes from another machine, the peer
+  opens no terminal; the page shows the attach command to run on that machine (over SSH, say).
+- **Tokens.** A peer's token is read from its `token_file` when needed and sent only to that
+  peer's `url`, in an `Authorization: Bearer` header. vigil does not follow redirects, and ignores
+  proxy settings and `.netrc` for these requests, so the token cannot be passed on to another
+  host. Anyone who can use this vigil (from this machine, or remotely with its token) can browse
+  the peers' sessions and resume them through it.
+
+Peers do not list each other's peers: each one serves only its own sessions, so two machines may
+list each other. Over plain `http://` the token crosses the network in the clear, which is fine
+over Tailscale (encrypted already); anywhere else, use an `https://` URL.
 
 ## License
 

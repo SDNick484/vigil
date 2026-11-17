@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 
+import httpx
 from fastapi import APIRouter, FastAPI
 
 import vigil
@@ -14,6 +15,7 @@ from vigil.config import Config
 from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
 from vigil.paths import data_dir, index_path
+from vigil.peers import CACHE_DIR, PeerHub
 from vigil.web import WebState, api, auth, pages, watcher
 from vigil.web.security import LoopbackGuard
 
@@ -31,6 +33,7 @@ def create_app(
     *,
     conn_factory: Callable[[], sqlite3.Connection] | None = None,
     start_watcher: bool = True,
+    peer_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     """The vigil web service.
 
@@ -40,10 +43,13 @@ def create_app(
     Every request passes `LoopbackGuard` first. With `config.server.token_file` set, remote
     access is on: the token is read and the cookie signing key loaded (or created) in the data
     dir now, and AuthError is raised when either cannot be used (`vigil.web.auth.load_auth`).
+    `config.peers` are asked for their sessions when a page lists them (`vigil.peers`);
+    `peer_transport` replaces the network for those requests (tests).
     """
     remote = auth.load_auth(config.server, data_dir())
     factory = conn_factory or functools.partial(connect, index_path())
-    web = WebState(config=config, conn_factory=factory)
+    hub = PeerHub(config.peers, cache_dir=data_dir() / CACHE_DIR, transport=peer_transport)
+    web = WebState(config=config, conn_factory=factory, peers=hub)
 
     def scanned(stats: ScanStats) -> None:
         web.last_scan_at = datetime.now(UTC)

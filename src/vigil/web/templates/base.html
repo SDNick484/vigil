@@ -37,7 +37,8 @@
         var code = document.createElement("code");
         code.textContent = data.attach;
         target.className = "result ok";
-        target.append(data.opened_terminal ? "Opened in a terminal: " : "Attach with: ", code);
+        var where = data.machine ? " on " + data.machine : "";
+        target.append(data.opened_terminal ? "Opened in a terminal" + where + ": " : "Attach" + where + " with: ", code);
       } else if (data.id) {
         target.className = "result ok";
         target.append("Saved");
