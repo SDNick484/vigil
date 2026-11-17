@@ -7,34 +7,113 @@ adds history, resume across projects and usage.
 
 ## Install
 
-vigil needs Python 3.14 or newer and runs on Linux (WSL2 counts). It also needs Claude Code
-(`claude`) on your `PATH` to resume sessions; indexing and browsing work without it.
+Setting vigil up takes about five minutes. You install it, check that it can read your sessions,
+try the web UI, then choose how to keep it running. Every step below runs as your own user, with
+no `sudo`.
 
-    pipx install vigil-sessions
+### What you need
 
-Where the system Python is older than 3.14, tell pipx which interpreter to use:
+- **Linux.** WSL2 counts.
+- **Python 3.14 or newer.** Check with `python3.14 --version`. If it's missing, install it from
+  your distribution; on Gentoo that's `emerge --ask dev-lang/python:3.14`. Your system's default
+  `python3` can stay as it is.
+- **git**, because vigil is installed straight from GitHub until the first release reaches PyPI.
+- **Claude Code** (`claude`) on your `PATH`, so that sessions can be resumed. Indexing and
+  browsing work without it.
 
-    pipx install --python python3.14 vigil-sessions
+### Step 1: install vigil
 
-Until the first release is on PyPI, install from a clone with `pipx install .`. The package is
-called `vigil-sessions`; the command is `vigil`.
+Pick **one** of the two ways below. Either way you end up with a `vigil` command in
+`~/.local/bin`, in its own private Python environment, so nothing it installs touches your system
+Python.
+
+**A. With pipx**, if your distribution has it:
+
+    pipx install --python python3.14 git+https://github.com/SDNick484/vigil
+
+**B. Without pipx**, using a plain virtual environment. This is the way to go on Gentoo and
+anywhere else pipx isn't packaged:
+
+    python3.14 -m venv ~/.local/share/vigil-venv
+    ~/.local/share/vigil-venv/bin/pip install git+https://github.com/SDNick484/vigil
+    mkdir -p ~/.local/bin
+    ln -sfn ~/.local/share/vigil-venv/bin/vigil ~/.local/bin/vigil
+
+Don't use `pip install --user` or `sudo pip install` instead. Most distributions block both to
+protect the system Python, and the virtual environment above does the same job safely.
+
+The package is called `vigil-sessions` (that's what pip and pipx list); the command is `vigil`.
+
+### Step 2: check that it works
+
+    vigil --version
+
+This prints something like `vigil-sessions 0.1.0`. If you get `vigil: command not found`,
+`~/.local/bin` isn't on your `PATH` yet: add `export PATH="$HOME/.local/bin:$PATH"` to
+`~/.bashrc` (or your shell's equivalent) and open a new terminal.
+
+Then let vigil read your sessions. It only ever reads `~/.claude` and never changes anything
+there:
+
+    vigil scan
+    vigil ls
+
+`vigil scan` reports something like `Scanned 53 transcripts: 53 read, 53 sessions updated,
+0 errors.` and `vigil ls` lists your most recent sessions with their project, branch and short id.
+The first scan of a large history can take a few seconds; after that, only new lines are read.
+
+### Step 3: try the web UI
+
+    vigil serve
+
+Open <http://127.0.0.1:7787> in a browser. You should see your sessions grouped by project, with a
+search box and a **Resume** button on each row. Press `Ctrl-C` in the terminal to stop it. vigil
+only listens on `127.0.0.1`, so other machines can't reach it (see [Remote access](#remote-access)
+if you want them to).
 
 ## Run
 
-`vigil serve` starts the web UI and JSON API on `http://127.0.0.1:7787`. It binds to loopback only,
-and `--port N` (or `port` in the config file) changes the port. Run it in the foreground to try it,
-then pick one of the service files in [`contrib/`](contrib/) to keep it running. All of them run
-`vigil serve` as your own user and expect `vigil` in `~/.local/bin`, where pipx puts it; edit the
-path if yours is elsewhere.
+To have vigil running all the time, start it with your desktop or as a user service. All three
+options below run `vigil serve` as you, from `~/.local/bin/vigil`.
 
-**systemd** (user unit):
+| You use | Choose | Resume opens a terminal window? |
+| --- | --- | --- |
+| A graphical desktop (MATE, GNOME, KDE, Xfce, …) | **XDG autostart** (recommended) | Yes |
+| systemd, and want it running without logging in | systemd user service | Usually not: shows the command to paste |
+| OpenRC 0.60 or newer, and want it running without logging in | OpenRC user service | No: shows the command to paste |
+
+Resume opens a terminal window only when vigil can see your display. Autostart runs inside your
+desktop session, so it can. A user service starts outside it and normally can't, so Resume starts
+the session in the background and shows you the `claude attach …` command to run yourself.
+
+### XDG autostart (desktop sessions)
+
+From a clone of this repository (`git clone https://github.com/SDNick484/vigil`), run:
+
+    mkdir -p ~/.config/autostart
+    sed "s|^Exec=vigil serve|Exec=$HOME/.local/bin/vigil serve|" \
+        contrib/xdg/vigil.desktop > ~/.config/autostart/vigil.desktop
+
+The `sed` writes the full path to `vigil` into the entry. Desktop sessions often don't have
+`~/.local/bin` on their `PATH`, because it's usually added in `~/.bashrc`, which they don't read.
+
+vigil now starts each time you log in. To start it right away without logging out:
+
+    setsid -f ~/.local/bin/vigil serve >/dev/null 2>&1
+
+To stop it, run `pkill -f "vigil serve"`. To turn autostart off, delete
+`~/.config/autostart/vigil.desktop`.
+
+### systemd user service
 
     mkdir -p ~/.config/systemd/user
     cp contrib/systemd/vigil.service ~/.config/systemd/user/
     systemctl --user daemon-reload
     systemctl --user enable --now vigil.service
 
-**OpenRC** (user service, OpenRC 0.60 or newer):
+Check it with `systemctl --user status vigil`, and read its log with `journalctl --user -u vigil`.
+
+### OpenRC user service
 
     mkdir -p ~/.config/rc/init.d
     install -m 755 contrib/openrc/vigil ~/.config/rc/init.d/vigil
@@ -43,14 +122,53 @@ path if yours is elsewhere.
 
 Set `vigil_bin` or `vigil_args` in `~/.config/rc/conf.d/vigil` to change the binary or pass flags.
 
-**XDG autostart** (any desktop that honours it, the fallback when you have neither):
+Both service files look for `claude` (and `tmux`, if you use the tmux launcher) in
+`~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin` and `/opt/bin`, where Gentoo installs
+Claude Code. If `claude` is somewhere else (`command -v claude` tells you where), add its folder
+to the `PATH` line in the file.
 
-    mkdir -p ~/.config/autostart
-    cp contrib/xdg/vigil.desktop ~/.config/autostart/
+## Upgrade
 
-The service needs `claude` (and `tmux`, if you use the tmux launcher) on its `PATH`. The systemd
-and OpenRC files add `~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`; if `claude` lives
-elsewhere, extend the `PATH` line in the file.
+Fetch the latest version the same way you installed it, then restart vigil.
+
+- **pipx:** `pipx install --force --python python3.14 git+https://github.com/SDNick484/vigil`
+- **Virtual environment:**
+  `~/.local/share/vigil-venv/bin/pip install --upgrade --force-reinstall git+https://github.com/SDNick484/vigil`
+
+To restart:
+- **Autostart:** `pkill -f "vigil serve"`, then start it again with the `setsid` line above.
+- **systemd:** `systemctl --user restart vigil`.
+- **OpenRC:** `rc-service --user vigil restart`.
+
+The index and your labels, notes and pins are kept.
+
+## Uninstall
+
+1. Stop vigil (see **To restart** under [Upgrade](#upgrade)) and remove the autostart entry or
+   service file you installed.
+2. Remove the program:
+   - **pipx:** `pipx uninstall vigil-sessions`
+   - **Virtual environment:** `rm -r ~/.local/share/vigil-venv ~/.local/bin/vigil`
+3. If you want, remove its data and settings: `rm -r ~/.local/share/vigil ~/.config/vigil`.
+
+Your Claude Code sessions in `~/.claude` are untouched: vigil never writes there.
+
+## Troubleshooting
+
+- **`vigil: command not found`.** `~/.local/bin` isn't on your `PATH`; see
+  [Step 2](#step-2-check-that-it-works).
+- **Resume says `claude` is not on PATH.** The service can't see Claude Code. Find it with
+  `command -v claude`, then add that folder to the service file's `PATH` line (Gentoo's
+  `/opt/bin` is already there), or use XDG autostart, which inherits your login `PATH`.
+- **Resume shows a command but no window opens.** vigil can't see your display, which is normal
+  for a user service. Run the command it shows, or switch to XDG autostart. To choose the
+  terminal yourself, set `resume.terminal_command` (see [Configuration](#configuration)).
+- **`address already in use` from `vigil serve`.** vigil (or something else) is already using port
+  7787. Run `pkill -f "vigil serve"` to stop vigil, or set `port` in the config file.
+- **A session is listed under the wrong name after an upgrade.** Names are worked out when a
+  transcript is read, and old entries keep the name they were given. To rebuild the index, stop
+  vigil, run `rm ~/.local/share/vigil/index.db` and then `vigil scan`. This also clears labels,
+  notes and pins.
 
 ## Configuration
 

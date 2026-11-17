@@ -21,5 +21,5 @@ command="${vigil_bin}"
 command_args="serve ${vigil_args}"
 
 # A user service does not inherit the login shell's PATH. vigil needs `claude` (and `tmux`,
-# for the fallback launcher) on PATH to resume sessions.
-export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+# for the fallback launcher) on PATH to resume sessions; /opt/bin is where Gentoo installs it.
+export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/bin:${PATH}"
