@@ -70,3 +70,21 @@ def test_always_use_keeps_the_file_mode(tmp_path: Path) -> None:
     path.chmod(0o600)
     add_default_flags(path, ["--verbose"])
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_always_use_in_a_read_only_folder_is_a_config_error(tmp_path: Path) -> None:
+    folder = tmp_path / "vigil"
+    folder.mkdir()
+    path = folder / "config.toml"
+    path.write_text(COMMENTED)
+    folder.chmod(0o555)
+    try:
+        with pytest.raises(ConfigError, match=r"cannot write config .*config\.toml: "):
+            add_default_flags(path, ["--verbose"])
+        missing = tmp_path / "vigil" / "sub" / "config.toml"  # its folder cannot be made
+        with pytest.raises(ConfigError, match="cannot write config"):
+            add_default_flags(missing, ["--verbose"])
+    finally:
+        folder.chmod(0o755)
+    assert path.read_text() == COMMENTED
+    assert [p.name for p in folder.iterdir()] == ["config.toml"]

@@ -525,6 +525,27 @@ def test_always_use_reloads_config(
     ]
 
 
+def test_always_use_refuses_when_the_config_cannot_be_written(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "vigil" / "config.toml"
+    before = config.read_text()
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+    config.parent.chmod(0o555)
+    try:
+        response = web_client.post(f"/reviews/{review_id}/suggestions/0/always-use")
+    finally:
+        config.parent.chmod(0o755)
+    assert response.status_code == 409, response.text
+    assert response.json()["reason"].startswith("cannot write config ")
+    assert config.read_text() == before
+    assert web_state(web_client).config.resume.default_flags == ()
+
+
 def test_acting_on_suggestions_never_writes_under_the_claude_home(
     vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
 ) -> None:

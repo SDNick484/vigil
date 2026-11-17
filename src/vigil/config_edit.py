@@ -41,8 +41,8 @@ def add_default_flags(path: Path, tokens: Sequence[str]) -> None:
 
     The rest of the file is kept as written. The result is loaded with `load_config` before it
     replaces the file (temp file in the same folder, then `os.replace`; the file's mode is kept).
-    Raises ConfigError, leaving the file as it was, when it cannot be read or parsed, when a flag
-    is refused, or when the result does not load.
+    Raises ConfigError, leaving the file as it was, when it cannot be read, parsed or written
+    (its folder is read-only, say), when a flag is refused, or when the result does not load.
     """
     target = path.resolve()  # through a symlink, not over it
     with _lock:
@@ -65,8 +65,11 @@ def add_default_flags(path: Path, tokens: Sequence[str]) -> None:
         except FlagRefused as error:
             raise ConfigError(f"resume.default_flags: {error.reason}") from error
         resume["default_flags"] = flags
-        mode = target.stat().st_mode & 0o777 if text is not None else _NEW_FILE_MODE
-        _replace(target, tomlkit.dumps(document), mode)
+        try:
+            mode = target.stat().st_mode & 0o777 if text is not None else _NEW_FILE_MODE
+            _replace(target, tomlkit.dumps(document), mode)
+        except OSError as error:
+            raise ConfigError(f"cannot write config {path}: {error.strerror or error}") from error
 
 
 def _replace(target: Path, text: str, mode: int) -> None:
