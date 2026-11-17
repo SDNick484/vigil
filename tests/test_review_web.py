@@ -1,9 +1,12 @@
+import os
 import sqlite3
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import LOOPBACK_URL, VigilEnv, freeze_tree
@@ -11,6 +14,9 @@ from tests.test_review_runner import ANSWER, claude_result
 from tests.test_review_store import NUMBERS, insert
 from vigil.config import load_config
 from vigil.index.db import connect
+from vigil.index.scanner import scan
+from vigil.review.runner import STOPPED
+from vigil.review.schema import Advice, Suggestion
 from vigil.review.store import INTERRUPTED, finish, get_review
 from vigil.web import WebState
 from vigil.web.app import create_app
@@ -173,13 +179,50 @@ def test_review_fragment_polls_while_running(vigil_env: VigilEnv, web_client: Te
     assert "$0.20" in done.text
 
 
-def test_review_fragment_404s(vigil_env: VigilEnv, web_client: TestClient) -> None:
+def test_review_fragment_stops_polling_when_gone(
+    vigil_env: VigilEnv, web_client: TestClient
+) -> None:
     conn = connect(vigil_env.index)
     review_id = insert(conn)
     conn.close()
-    assert web_client.get(f"/sessions/{NAMED}/reviews/{review_id + 1}").status_code == 404
     other = "f26f1b2c-d3b2-4389-b0ed-aba7e19e8594"
-    assert web_client.get(f"/sessions/{other}/reviews/{review_id}").status_code == 404
+    for url in (
+        f"/sessions/{NAMED}/reviews/{review_id + 1}",
+        f"/sessions/{other}/reviews/{review_id}",
+    ):
+        gone = web_client.get(url)
+        assert gone.status_code == 286  # htmx stops polling
+        assert "This review is no longer available." in gone.text
+        assert "hx-trigger" not in gone.text
+    # The review's session leaves the index while the page polls it.
+    conn = connect(vigil_env.index)
+    with conn:
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (NAMED,))
+    conn.close()
+    assert web_client.get(f"/sessions/{NAMED}/reviews/{review_id}").status_code == 286
+
+
+def test_review_text_is_escaped(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    script = "<script>alert(1)</script>"
+    card = Suggestion(
+        kind="file",
+        title=script,
+        why=script,
+        evidence=script,
+        flag_name=None,
+        flag_value=None,
+        file_target="project_claude_md",
+        file_text=script,
+        file_settings=None,
+    )
+    conn = connect(vigil_env.index)
+    review_id = insert(conn)
+    finish(conn, review_id, suggestions=[card], advice=[Advice(script, script)], cost_usd=0.1)
+    conn.close()
+    for url in (f"/sessions/{NAMED}/reviews/{review_id}", f"/sessions/{NAMED}"):
+        text = web_client.get(url).text
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+        assert "<script>alert" not in text
 
 
 def test_review_shows_the_numbers_it_used(vigil_env: VigilEnv, web_client: TestClient) -> None:
@@ -217,3 +260,47 @@ def test_review_never_writes_under_the_claude_home(
     assert web_client.post(f"/sessions/{NAMED}/review").status_code == 202
     (review,) = wait_done(web_client)
     assert review["status"] == "done"
+
+
+SLEEPING_CLAUDE = """#!{python}
+import os, sys, time
+if "-p" in sys.argv:
+    with open({pid_file!r}, "w") as handle:
+        handle.write(str(os.getpid()))
+    time.sleep(60)
+"""
+
+
+def test_shutdown_stops_a_running_review(vigil_env: VigilEnv, tmp_path: Path) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    pid_file = tmp_path / "claude.pid"
+    claude = vigil_env.bin.directory / "claude"
+    claude.write_text(SLEEPING_CLAUDE.format(python=sys.executable, pid_file=str(pid_file)))
+    claude.chmod(0o755)
+    conn = connect(vigil_env.index)
+    scan(conn, vigil_env.claude_home)
+    conn.close()
+    set_cwd(vigil_env, folder)
+    app = create_app(
+        load_config(), conn_factory=lambda: connect(vigil_env.index), start_watcher=False
+    )
+    started = time.monotonic()
+    with TestClient(app, base_url=LOOPBACK_URL, headers={"Origin": LOOPBACK_URL}) as client:
+        response = client.post(f"/sessions/{NAMED}/review")
+        assert response.status_code == 202, response.text
+        review_id = response.json()["review_id"]
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, "the fake claude never started"
+            time.sleep(0.05)
+        pid = int(pid_file.read_text())
+    assert time.monotonic() - started < 30  # stopped, not waited for
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    conn = connect(vigil_env.index)
+    stored = get_review(conn, review_id)
+    conn.close()
+    assert stored is not None
+    assert (stored.status, stored.error) == ("failed", STOPPED)
+    assert STOPPED == "vigil stopped during the review"

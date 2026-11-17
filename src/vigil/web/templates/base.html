@@ -59,11 +59,12 @@
         var where = data.machine ? " on " + data.machine : "";
         target.append(data.opened_terminal ? "Opened in a terminal" + where + ": " : "Attach" + where + " with: ", code);
       } else if (typeof data.review_id === "number") {
-        // A review started, or one is already running: show it in the list (it polls itself).
+        // A review started (show it in the list; it polls itself), or one is already running.
         target.className = data.ok === true ? "result ok" : "result refused";
         target.append(data.ok === true ? "Review started" : (data.reason || "A review is already running"));
         var list = document.getElementById("reviews");
-        if (list && !document.getElementById("review-" + data.review_id)) {
+        // Only a review this request started is surely this session's; a busy one may not be.
+        if (data.ok === true && list && !document.getElementById("review-" + data.review_id)) {
           var fragment = new URL(xhr.responseURL).pathname.replace(/\/review$/, "/reviews/" + data.review_id);
           htmx.ajax("GET", fragment, {target: "#reviews", swap: "afterbegin"});
         }

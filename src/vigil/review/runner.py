@@ -41,8 +41,15 @@ from vigil.config import ReviewConfig
 from vigil.index.queries import SessionRow, vigil_launch_flags
 from vigil.resume import ResumeRefused, _check_cwd
 from vigil.review.numbers import SessionNumbers, compute_numbers, wall_clock
-from vigil.review.schema import MAX_TEXT, SCHEMA, Advice, Suggestion, parse_output
-from vigil.review.store import Review, fail, finish, insert_running, running_review
+from vigil.review.schema import SCHEMA, Advice, Suggestion, clean, parse_output
+from vigil.review.store import (
+    Review,
+    fail,
+    fail_if_running,
+    finish,
+    insert_running,
+    running_review,
+)
 
 REVIEW_TIMEOUT = 600.0
 """Seconds a review may run before `claude` is stopped and the review fails."""
@@ -70,18 +77,71 @@ class ReviewBusy(Exception):
         self.review_id = review_id
 
 
+STOPPED = "vigil stopped during the review"
+"""The error of a review whose `claude` was stopped because the service was shutting down."""
+
+STOP_WAIT = 5.0
+"""Seconds `ReviewSlot.stop` waits for `claude` to exit after SIGTERM before it kills it."""
+
+
 class ReviewSlot:
     """One review at a time in this process: `try_start` takes the slot (False when it is
-    taken), `finish` gives it back, from any thread."""
+    taken), `finish` gives it back, from any thread. While the review's `claude` runs, the slot
+    holds it, so `stop` can end it when the service shuts down."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._guard = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+        self._review_id: int | None = None
+        self._stopping = False
 
     def try_start(self) -> bool:
         return self._lock.acquire(blocking=False)
 
     def finish(self) -> None:
         self._lock.release()
+
+    def attach(self, review_id: int, process: subprocess.Popen[str]) -> bool:
+        """Note that `process` is running review `review_id`. False when the slot is stopping:
+        the caller must not let it run."""
+        with self._guard:
+            if self._stopping:
+                return False
+            self._process, self._review_id = process, review_id
+            return True
+
+    def detach(self) -> None:
+        with self._guard:
+            self._process = self._review_id = None
+
+    @property
+    def stopping(self) -> bool:
+        with self._guard:
+            return self._stopping
+
+    def stop(self, wait: float = STOP_WAIT) -> int | None:
+        """Stop for good: terminate the running review's `claude` (SIGTERM, then SIGKILL after
+        `wait` seconds) and keep any later one from starting. Returns the id of the review that
+        was running, or None."""
+        with self._guard:
+            self._stopping = True
+            process, review_id = self._process, self._review_id
+        if process is not None:
+            _end(process, wait)
+        return review_id
+
+
+def _end(process: subprocess.Popen[str], wait: float) -> None:
+    """Terminate `process`, and kill it if it has not exited within `wait` seconds."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def review_argv(session_id: str, cfg: ReviewConfig, schema_json: str, prompt: str) -> list[str]:
@@ -307,7 +367,7 @@ def _cost(result: dict[str, Any]) -> float | None:
 def _models(result: dict[str, Any]) -> str | None:
     usage = result.get("modelUsage")
     names = [name for name in usage if isinstance(name, str)] if isinstance(usage, dict) else []
-    return ", ".join(names)[:MAX_TEXT] or None
+    return clean(", ".join(names)) or None
 
 
 def interpret(stdout: str, returncode: int, stderr: str, budget_usd: float) -> _Outcome:
@@ -317,7 +377,7 @@ def interpret(stdout: str, returncode: int, stderr: str, budget_usd: float) -> _
         tail = (stderr.strip() or stdout.strip())[-300:]
         detail = f": {tail}" if tail else ""
         error = f"claude exited with code {returncode} and no result{detail}"
-        return _Outcome(None, None, error[:MAX_TEXT], None)
+        return _Outcome(None, None, clean(error), None)
     cost, model = _cost(result), _models(result)
     answer = _answer(result)
     if answer is None:
@@ -325,7 +385,7 @@ def interpret(stdout: str, returncode: int, stderr: str, budget_usd: float) -> _
             error = f"claude: {_reason(result)}"
         else:
             error = f"Claude's answer was not in the expected form: {_reason(result)}"
-        return _Outcome(None, cost, error[:MAX_TEXT], model)
+        return _Outcome(None, cost, clean(error), model)
     note: str | None = None
     if result.get("subtype") == "error_max_budget_usd":
         spent = f"${cost:.2f}" if cost is not None else "more"
@@ -334,31 +394,61 @@ def interpret(stdout: str, returncode: int, stderr: str, budget_usd: float) -> _
         note = f"claude reported an error after answering: {_reason(result)}"
     elif returncode != 0:
         note = f"claude exited with code {returncode} after answering"
-    return _Outcome(parse_output(answer), cost, note[:MAX_TEXT] if note else None, model)
+    return _Outcome(parse_output(answer), cost, clean(note) if note else None, model)
 
 
-def complete_review(pending: PendingReview, conn: sqlite3.Connection) -> None:
+def _run(pending: PendingReview, slot: ReviewSlot | None) -> tuple[str, str, int] | None:
+    """Run the review's `claude` and return `(stdout, stderr, exit code)`; None when it timed out
+    (it is killed) or `slot` stopped it. Raises OSError when it cannot be started."""
+    process = subprocess.Popen(  # noqa: S603 - argv is built by review_argv
+        pending.argv,
+        cwd=pending.cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    try:
+        if slot is not None and not slot.attach(pending.review_id, process):
+            _end(process, 0)
+            return None
+        try:
+            stdout, stderr = process.communicate(timeout=REVIEW_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            return None
+        if slot is not None and slot.stopping:  # ended by `stop`, not by itself
+            return None
+        return stdout, stderr, process.returncode
+    finally:
+        if slot is not None:
+            slot.detach()
+        if process.poll() is None:  # an exception while it ran
+            _end(process, 0)
+
+
+def complete_review(
+    pending: PendingReview, conn: sqlite3.Connection, *, slot: ReviewSlot | None = None
+) -> None:
     """Run the review's `claude` and store the outcome: `done` with the suggestions, or `failed`
-    with why. The row never stays `running`, whatever goes wrong."""
+    with why. The row never stays `running`, whatever goes wrong. With `slot`, the process is
+    held there while it runs, and a `slot.stop()` ends it and fails the review with `STOPPED`."""
     try:
         try:
-            run = subprocess.run(  # noqa: S603 - argv is built by review_argv
-                pending.argv,
-                cwd=pending.cwd,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=REVIEW_TIMEOUT,
-                stdin=subprocess.DEVNULL,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+            ran = _run(pending, slot)
+        except OSError as error:
+            fail(conn, pending.review_id, clean(f"could not run claude: {error}"))
+            return
+        if ran is None and slot is not None and slot.stopping:
+            fail_if_running(conn, pending.review_id, STOPPED)
+            return
+        if ran is None:
             fail(conn, pending.review_id, f"stopped after {REVIEW_TIMEOUT:.0f} s without an answer")
             return
-        except OSError as error:
-            fail(conn, pending.review_id, f"could not run claude: {error}"[:MAX_TEXT])
-            return
-        outcome = interpret(run.stdout, run.returncode, run.stderr, pending.budget_usd)
+        stdout, stderr, returncode = ran
+        outcome = interpret(stdout, returncode, stderr, pending.budget_usd)
         if outcome.answer is None:
             fail(conn, pending.review_id, outcome.error or "no answer", cost_usd=outcome.cost_usd)
             return
@@ -373,7 +463,7 @@ def complete_review(pending: PendingReview, conn: sqlite3.Connection) -> None:
             error=outcome.error,
         )
     except BaseException as error:
-        fail(conn, pending.review_id, f"the review stopped: {error!r}"[:MAX_TEXT])
+        fail(conn, pending.review_id, clean(f"the review stopped: {error!r}"))
         raise
 
 

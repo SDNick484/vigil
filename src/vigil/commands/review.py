@@ -9,20 +9,33 @@ import json
 import shlex
 import sys
 
-from vigil.catalog import current_catalog, refresh_catalog
+from vigil.catalog import CatalogEntry, current_catalog, refresh_catalog
 from vigil.claude_cli import capabilities
 from vigil.commands import find_session, open_index
 from vigil.config import Config
-from vigil.flags import parse_suggested
+from vigil.flags import FlagRefused, check, parse_suggested
 from vigil.review.runner import ReviewRefused, busy_review, run_review
+from vigil.review.schema import Suggestion
 from vigil.review.store import Review, get_review, review_to_dict
 
 NOTE = "Suggestions come from Claude reading this session. Check them before acting."
 
 
-def render(review: Review) -> str:
-    """A review as text: status and cost, then each suggestion (with the command line for a
-    flag), then the token advice."""
+def _flag_line(review: Review, item: Suggestion, catalog: list[CatalogEntry]) -> str:
+    """The command line to try a flag suggestion with, if the flag allow-list lets it through
+    (against the installed version's flags, when known); otherwise why not."""
+    assert item.flag_name is not None
+    try:
+        flags = check(parse_suggested(item.flag_name, item.flag_value), catalog or None)
+    except FlagRefused as refused:
+        return f"   vigil will not suggest running this flag: {refused.reason}"
+    return f"   Try: {shlex.join(['claude', '--resume', review.session_id, *flags])}"
+
+
+def render(review: Review, catalog: list[CatalogEntry] | None = None) -> str:
+    """A review as text: status and cost, then each suggestion (for a flag, the command line to
+    try it with, only when the flag allow-list passes it against `catalog`), then the token
+    advice."""
     cost = f", ${review.cost_usd:.2f}" if review.cost_usd is not None else ""
     lines = [f"Review {review.id} of {review.session_id}: {review.status}{cost}"]
     if review.error and review.status == "done":
@@ -36,8 +49,7 @@ def render(review: Review) -> str:
         if item.evidence:
             lines.append(f"   Evidence: {item.evidence}")
         if item.flag_name:
-            flags = parse_suggested(item.flag_name, item.flag_value)
-            lines.append(f"   Try: {shlex.join(['claude', '--resume', review.session_id, *flags])}")
+            lines.append(_flag_line(review, item, catalog or []))
         if item.file_target:
             lines.append(f"   File: {item.file_target}")
             body = (
@@ -73,11 +85,12 @@ class ReviewCommand:
                 print(f"vigil: a review is already running (review {running.id})", file=sys.stderr)
                 return 2
             refresh_catalog(conn)
+            catalog = current_catalog(conn)
             try:
                 review_id = run_review(
                     row,
                     config.review,
-                    current_catalog(conn),
+                    catalog,
                     config.resume.default_flags,
                     conn,
                     claude_version=capabilities().version,
@@ -91,7 +104,9 @@ class ReviewCommand:
         if review is None:  # removed by a concurrent rescan meanwhile
             print("vigil: the review's session left the index", file=sys.stderr)
             return 1
-        print(json.dumps(review_to_dict(review), indent=2) if args.json else render(review))
+        print(
+            json.dumps(review_to_dict(review), indent=2) if args.json else render(review, catalog)
+        )
         if review.status == "failed":
             print(f"vigil: the review failed: {review.error}", file=sys.stderr)
             return 1

@@ -3,10 +3,12 @@ that answer back (`parse_output`).
 
 The answer comes from Claude reading a transcript that can hold fetched web pages and other
 untrusted text, so it is untrusted too: every item is checked here, an invalid one is dropped
-rather than failing the review, and every text field is cut to `MAX_TEXT` characters. What a
-suggestion may then make vigil do is decided later, by the allow-lists (`vigil.flags`).
+rather than failing the review, and every text field loses its control characters and is cut to
+`MAX_TEXT` characters. What a suggestion may then make vigil do is decided later, by the
+allow-lists (`vigil.flags`).
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal, cast, get_args
 
@@ -20,6 +22,7 @@ Kind = Literal["flag", "file", "habit"]
 FileTarget = Literal["project_claude_md", "project_settings", "user_claude_md", "user_settings"]
 
 _SETTINGS_TARGETS = ("project_settings", "user_settings")
+_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 
 
 def _text(description: str) -> dict[str, Any]:
@@ -115,17 +118,24 @@ class Advice:
     why: str
 
 
+def clean(text: str, limit: int = MAX_TEXT) -> str:
+    """`text` without control characters (C0, DEL and C1, except newline: they could drive a
+    terminal that prints it), cut to `limit` characters."""
+    return _CONTROL.sub("", text)[:limit]
+
+
 def _cut(value: Any, limit: int = MAX_TEXT) -> str | None:
-    """`value` cut to `limit` characters, or None when it is not a string."""
-    return value[:limit] if isinstance(value, str) else None
+    """`value` cleaned and cut to `limit` characters, or None when it is not a string."""
+    return clean(value, limit) if isinstance(value, str) else None
 
 
 def _cut_leaves(value: Any) -> Any:
-    """`value` (parsed JSON) with every string in it cut to `MAX_TEXT` characters."""
+    """`value` (parsed JSON) with every string in it, keys included, cleaned and cut to
+    `MAX_TEXT` characters."""
     if isinstance(value, str):
-        return value[:MAX_TEXT]
+        return clean(value)
     if isinstance(value, dict):
-        return {str(key)[:MAX_TEXT]: _cut_leaves(item) for key, item in value.items()}
+        return {clean(str(key)): _cut_leaves(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_cut_leaves(item) for item in value]
     return value

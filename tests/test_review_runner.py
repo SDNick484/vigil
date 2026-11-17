@@ -194,6 +194,22 @@ def test_parse_output_settings_file_needs_an_object() -> None:
     assert suggestions[0].file_settings == {"model": "x" * 500}
 
 
+def test_parse_output_strips_control_characters() -> None:
+    item = {
+        "kind": "file",
+        "title": "Copy \x1b]52;c;cGF5bG9hZA==\x07this",
+        "why": "line one\nline\x00 two\x9b31m",
+        "evidence": "turn\r 2",
+        "file": {"target": "project_settings", "settings": {"model\x1b": ["a\x07b"]}},
+    }
+    (suggestion,), _ = parse_output({"suggestions": [item]})
+    assert suggestion.title == "Copy ]52;c;cGF5bG9hZA==this"
+    assert "\x1b" not in suggestion.title and "\x07" not in suggestion.title
+    assert suggestion.why == "line one\nline two31m"
+    assert suggestion.evidence == "turn 2"
+    assert suggestion.file_settings == {"model": ["ab"]}
+
+
 def test_parse_output_tolerates_garbage() -> None:
     assert parse_output(None) == ([], [])
     assert parse_output({"suggestions": "no"}) == ([], [])

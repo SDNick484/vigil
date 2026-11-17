@@ -165,6 +165,18 @@ def fail(
         )
 
 
+def fail_if_running(conn: sqlite3.Connection, review_id: int, error: str) -> bool:
+    """Mark a review failed, saying why, unless it has already finished; return whether it was
+    still running."""
+    with conn:
+        cursor = conn.execute(
+            "UPDATE reviews SET status = 'failed', finished_at = ?, error = ? "
+            "WHERE id = ? AND status = 'running'",
+            (to_db(datetime.now(UTC)), error, review_id),
+        )
+    return cursor.rowcount > 0
+
+
 def fail_running(conn: sqlite3.Connection) -> int:
     """Mark every review still `running` failed with `INTERRUPTED` (the service calls this when
     it starts); return how many there were."""

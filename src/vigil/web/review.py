@@ -33,6 +33,9 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["review"])
 
+STOP_POLLING = 286
+"""The status that tells htmx to stop polling an element."""
+
 
 class SuggestionOut(BaseModel):
     kind: Literal["flag", "file", "habit"]
@@ -98,7 +101,7 @@ def _run_in_background(web: WebState, pending: PendingReview) -> None:
     try:
         conn = web.conn_factory()
         try:
-            complete_review(pending, conn)
+            complete_review(pending, conn, slot=web.review_slot)
         finally:
             conn.close()
     except Exception:
@@ -162,11 +165,16 @@ def start_review(request: Request, session_id: str) -> dict[str, object] | JSONR
 @router.get("/sessions/{session_id}/reviews/{review_id}", response_class=HTMLResponse)
 def review_fragment(request: Request, session_id: str, review_id: int) -> Any:
     """One review of a session as an HTML fragment (`_review.html`), for the session page. While
-    the review runs, the fragment reloads itself every 2 s."""
+    the review runs, the fragment reloads itself every 2 s. A review that is gone (or not this
+    session's) answers 286, which makes htmx stop polling, with a line saying so."""
     with connection(request) as conn:
         review = get_review(conn, review_id)
     if review is None or review.session_id != session_id:
-        return HTMLResponse("", status_code=404)
+        return HTMLResponse(
+            f'<article class="review" id="review-{review_id}"><p class="muted">'
+            "This review is no longer available.</p></article>",
+            status_code=STOP_POLLING,
+        )
     return templates.TemplateResponse(request, "_review.html", {"review": review})
 
 

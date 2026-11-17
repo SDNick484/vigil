@@ -16,7 +16,8 @@ from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
 from vigil.paths import data_dir, index_path
 from vigil.peers import CACHE_DIR, PeerHub
-from vigil.review.store import fail_running
+from vigil.review.runner import STOPPED
+from vigil.review.store import fail_if_running, fail_running
 from vigil.web import WebState, api, auth, pages, review, watcher
 from vigil.web.security import LoopbackGuard
 
@@ -47,7 +48,8 @@ def create_app(
     dir now, and AuthError is raised when either cannot be used (`vigil.web.auth.load_auth`).
     `config.peers` are asked for their sessions when a page lists them (`vigil.peers`);
     `peer_transport` replaces the network for those requests (tests). On startup, reviews left
-    `running` by an earlier run of the service are marked failed (`vigil.review.store`).
+    `running` by an earlier run of the service are marked failed (`vigil.review.store`); on
+    shutdown, a review in progress has its `claude` stopped and is marked failed.
     """
     remote = auth.load_auth(config.server, data_dir())
     factory = conn_factory or functools.partial(connect, index_path())
@@ -80,6 +82,14 @@ def create_app(
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            # End a review's `claude` rather than leave it running without the service.
+            stopped = await asyncio.to_thread(web.review_slot.stop)
+            if stopped is not None:
+                conn = factory()
+                try:
+                    fail_if_running(conn, stopped, STOPPED)
+                finally:
+                    conn.close()
 
     app = FastAPI(title="vigil", version=vigil.__version__, lifespan=lifespan)
     app.state.vigil = web

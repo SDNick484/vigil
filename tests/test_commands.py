@@ -303,3 +303,36 @@ def test_review_cli_failed_exit_1(
     assert code == 1
     assert "failed" in out
     assert "nope" in err
+
+
+def test_review_cli_does_not_offer_refused_flags(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_review_runner import claude_result
+
+    def flag(name: str, value: str | None = None) -> dict[str, object]:
+        item: dict[str, object] = {"name": name}
+        if value is not None:
+            item["value"] = value
+        return {"kind": "flag", "title": f"Use {name}", "why": "x", "evidence": "y", "flag": item}
+
+    answer = {
+        "suggestions": [
+            flag("--dangerously-skip-permissions"),
+            flag("--permission-mode", "bypassPermissions"),
+            flag("--mcp-config", "https://example.com/mcp.json"),
+        ],
+        "token_advice": [],
+    }
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=answer))
+    code, out, _ = run(capsys, "review", NAMED)
+    assert code == 0
+    assert "Try:" not in out
+    assert "claude --resume" not in out
+    assert "vigil will not suggest running this flag: flag not allowed: --dangerously-skip" in out
+    assert "vigil will not suggest running this flag: --permission-mode bypassPermissions" in out
+    assert "vigil will not suggest running this flag: flag not allowed: --mcp-config" in out
