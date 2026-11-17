@@ -58,6 +58,7 @@ from vigil.flags import FlagRefused, check, parse_suggested
 from vigil.index.queries import SessionRow, get_session, vigil_launch_flags
 from vigil.paths import config_path
 from vigil.peers import (
+    CHANGE_TIMEOUT,
     HASH,
     PEER_TIMEOUT,
     RESUME_TIMEOUT,
@@ -66,6 +67,7 @@ from vigil.peers import (
     PeerReview,
     ResumeForwardError,
     change_from_dict,
+    is_count,
     is_session_id,
     launch_answer,
     review_from_dict,
@@ -711,7 +713,7 @@ def start_review_on_peer(
     if isinstance(found, JSONResponse):
         return found
     review_id = found.get("review_id")
-    if type(review_id) is not int:
+    if not is_count(review_id):
         return _refusal(502, f"{peer}: answered something that is not a review start")
     return {"ok": True, "review_id": review_id}
 
@@ -722,7 +724,9 @@ def peer_review_fragment(request: Request, peer: str, session_id: str, review_id
     `GET /api/v1/reviews/{rid}` and rendered here (`_review.html`, its actions pointing at the
     mirrors), polling while it runs as the local fragment does. A review the peer no longer has
     answers 286, as does a peer that cannot be asked (saying why; reloading the page asks
-    again)."""
+    again). 404 when there is no peer called `peer`."""
+    if state(request).peers.peer(peer) is None:
+        return _refusal(404, f"no peer called {peer!r}")
     path = f"/api/v1/reviews/{review_id}"
     status, answer = _forward(request, peer, "GET", path, timeout=PEER_TIMEOUT)
     if status == 404:
@@ -842,11 +846,12 @@ def always_use_suggestion_on_peer(
 )
 def show_change_on_peer(request: Request, peer: str, review_id: int, index: int) -> Any:
     """The change a file suggestion of a review of the peer called `peer` would make there, read
-    from the peer's `GET /api/v1/reviews/{rid}/suggestions/{i}/change` and rendered here
+    from the peer's `GET /api/v1/reviews/{rid}/suggestions/{i}/change` (within `CHANGE_TIMEOUT`)
+    and rendered here
     (`_file_change.html`, its Apply form posting to the mirror). The peer's refusal (a change it
     will not make, say) comes back as JSON with its reason."""
     path = f"/api/v1{_suggestion_path(review_id, index, 'change')}"
-    status, answer = _forward(request, peer, "GET", path, timeout=PEER_TIMEOUT)
+    status, answer = _forward(request, peer, "GET", path, timeout=CHANGE_TIMEOUT)
     if not 200 <= status < 300:
         return JSONResponse(answer, status_code=status)
     found = change_from_dict(answer)

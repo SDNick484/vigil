@@ -50,6 +50,7 @@ from vigil.peers import (
     local_machine,
     session_from_dict,
 )
+from vigil.review.numbers import numbers_to_dict
 from vigil.review.schema import Suggestion
 from vigil.review.store import finish, insert_running
 from vigil.serialize import session_to_dict
@@ -1031,8 +1032,8 @@ def test_peer_review_is_cleaned(machines: Machines) -> None:
         "created_at": "2026-11-01T10:00:00.000000+00:00",
         "finished_at": "2026-11-01T10:01:00.000000+00:00",
         "status": "done",
-        "cost_usd": 0.1,
-        "numbers": {"turns": "not a list"},
+        "cost_usd": 10**400,  # too large for a float
+        "numbers": dict(NUMBERS_DICT, cache_hit_share=10**400),
         "suggestions": [
             {"kind": "bogus", "title": "Dropped", "why": "not a kind"},
             {
@@ -1051,6 +1052,8 @@ def test_peer_review_is_cleaned(machines: Machines) -> None:
     def peer_c(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/reviews/7":
             return httpx.Response(200, json=review)
+        if request.url.path == f"/api/v1/sessions/{C_SESSION}/reviews":
+            return httpx.Response(200, json=[review])
         return httpx.Response(200, json=[canned_session()])
 
     machines.network.hosts[PEER_C_HOST] = peer_c
@@ -1063,6 +1066,17 @@ def test_peer_review_is_cleaned(machines: Machines) -> None:
     assert "Bell &lt;script&gt;x&lt;/script&gt;" in fragment
     assert "w" * 500 in fragment and "w" * 501 not in fragment
     assert "Numbers the review was given" not in fragment
+    assert "$" not in fragment.split("</h3>")[0]  # no cost shown
+
+    # The reviews list mirror and the session page read the same review without failing.
+    listed = machines.laptop.get(f"/peers/peer-c/api/v1/sessions/{C_SESSION}/reviews")
+    assert listed.status_code == 200, listed.text
+    assert [(r["id"], r["cost_usd"], r["numbers"]) for r in listed.json()] == [(7, None, None)]
+    page = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}")
+    assert page.status_code == 200 and 'id="review-7"' in page.text
+    review["cost_usd"] = 0.25
+    fragment = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}/reviews/7").text
+    assert "$0.25" in fragment
 
     review["status"] = "exploded"
     response = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}/reviews/7")
@@ -1198,6 +1212,8 @@ def test_forward_refusal_prefixed(machines: Machines) -> None:
     response = laptop.post(f"/peers/nobody/sessions/{HANDMADE}/review")
     assert response.status_code == 404 and "no peer called 'nobody'" in response.json()["reason"]
     assert laptop.post("/peers/nobody/reviews/1/suggestions/0/resume").status_code == 404
+    response = laptop.get(f"/peers/nobody/sessions/{HANDMADE}/reviews/1")
+    assert (response.status_code, response.json()["reason"]) == (404, "no peer called 'nobody'")
     assert laptop.post("/peers/peer-b/sessions/-rf/review").status_code == 404
     assert laptop.get("/peers/peer-b/reviews/x/suggestions/0/change").status_code == 422
     response = laptop.post(f"{base}/1/apply", data={"before_hash": "../../etc"})
@@ -1305,3 +1321,77 @@ def test_forward_suggestion_resume_and_start_new(machines: Machines) -> None:
     assert started[0].argv == ["--bg", "--resume", HANDMADE, "--remote-control", "--model", "opus"]
     assert started[1].argv[:1] == ["--bg"] and started[1].argv[-2:] == ["--model", "opus"]
     assert {call.cwd for call in started} == {str(machines.peer_b_cwd)}
+
+
+NUMBERS_DICT: dict[str, Any] = numbers_to_dict(NUMBERS)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"cache_hit_share": 10**400},
+        {"cache_hit_share": float("nan")},
+        {"cache_hit_share": 2},
+        {"compactions": 2**63},
+        {"compactions": -1},
+        {"compactions": True},
+        {"totals": dict(NUMBERS_DICT["totals"], output=10**400)},
+        {"turns": [dict(NUMBERS_DICT["turns"][0], input=2**63)]},
+        {"largest_tool_outputs": [{"tool": "Bash", "size": 10**400}]},
+        {"turns": "not a list"},
+    ],
+)
+def test_numbers_from_peer_refuses_out_of_range(change: dict[str, Any]) -> None:
+    assert peers.numbers_from_peer(NUMBERS_DICT) == NUMBERS
+    assert peers.numbers_from_peer({**NUMBERS_DICT, **change}) is None
+
+
+def test_review_from_peer_bounds_numbers() -> None:
+    review = {
+        "id": 7,
+        "session_id": C_SESSION,
+        "created_at": "2026-11-01T10:00:00.000000+00:00",
+        "status": "done",
+        "cost_usd": 10**400,
+        "numbers": dict(NUMBERS_DICT, compactions=10**400),
+    }
+    found = peers.review_from_dict(review, "peer-c")
+    assert found is not None
+    assert (found.cost_usd, found.numbers) == (None, None)
+    assert peers.review_from_dict({**review, "cost_usd": 0.5}, "peer-c").cost_usd == 0.5  # type: ignore[union-attr]
+    for review_id in (2**63, -1, 10**400, True, 7.0):
+        assert peers.review_from_dict({**review, "id": review_id}, "peer-c") is None
+
+
+def test_forward_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+
+    # A redirect is not followed: the token goes to peer-b only.
+    def redirect(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": f"{PEER_C_URL}/api/v1/reviews/1"})
+
+    network = Network(hosts={PEER_B_HOST: redirect, PEER_C_HOST: peer_c_handler})
+    answer = peers.forward(
+        peer, "GET", "/api/v1/reviews/1", timeout=1.0, transport=network.transport()
+    )
+    reason = "peer-b: answered 302 (a redirect, which is not followed)"
+    assert answer == (502, {"ok": False, "reason": reason})
+    assert network.to(PEER_C_HOST) == []
+    assert [r.url.host for r in network.requests] == [PEER_B_HOST]
+
+    # An answer over the cap.
+    monkeypatch.setattr(peers, "MAX_ANSWER_BYTES", 64)
+    network = Network(hosts={PEER_B_HOST: lambda r: httpx.Response(200, json=["x" * 100])})
+    answer = peers.forward(peer, "GET", "/x", timeout=1.0, transport=network.transport())
+    assert answer == (502, {"ok": False, "reason": "peer-b: answer larger than 64 bytes"})
+
+    # A timeout, connecting or reading.
+    for error in (httpx.ConnectTimeout, httpx.ReadTimeout):
+        answer = peers.forward(peer, "POST", "/x", timeout=1.0, transport=failing(error))
+        assert answer == (502, {"ok": False, "reason": "peer-b: timed out"})
+    # An answer still coming in after the deadline.
+    clock = iter([0.0])  # the request starts at 0; every later look at the clock is 5 s on
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock, 5.0))
+    network = Network(hosts={PEER_B_HOST: lambda r: httpx.Response(200, json={"ok": True})})
+    answer = peers.forward(peer, "GET", "/x", timeout=1.0, transport=network.transport())
+    assert answer == (502, {"ok": False, "reason": "peer-b: timed out after 1 s"})

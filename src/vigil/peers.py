@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, TypeGuard, cast, get_args
 from urllib.parse import quote
 
 import httpx
@@ -60,6 +60,10 @@ must also be in within this many seconds of starting (checked as it is read)."""
 REVIEW_TIMEOUT = 30.0
 """Seconds a peer has to answer a forwarded review start (it answers at once, and runs the review
 in the background), Always use or Apply."""
+
+CHANGE_TIMEOUT = 10.0
+"""Seconds a peer has to answer a forwarded change preview: it may ask git for the project folder
+(up to 5 s) first."""
 
 RESUME_TIMEOUT = 330.0
 """Seconds a peer has to answer a forwarded resume once connected: it waits for `claude --bg` or
@@ -503,7 +507,7 @@ def forward(
             refusal: dict[str, Any] = {"ok": False, "reason": f"{peer.name}: {clean(reason)}"}
             if isinstance(parsed.get("restartable"), bool):
                 refusal["restartable"] = parsed["restartable"]
-            if type(parsed.get("review_id")) is int:
+            if is_count(parsed.get("review_id")):
                 refusal["review_id"] = parsed["review_id"]
             return status, refusal
     return _unusable(peer, _status_problem(response))
@@ -524,15 +528,29 @@ class PeerReview(Review):
 
 
 def _number(value: Any) -> float | None:
-    """`value` when it is a finite number (not a bool) of at least 0."""
+    """`value` as a float when it is a finite number (not a bool) of at least 0; None otherwise,
+    an integer too large for a float included."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if math.isfinite(value) and value >= 0 else None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+MAX_INT = 2**63
+"""Counts and ids from a peer must be below this (and at least 0)."""
+
+
+def is_count(value: Any) -> TypeGuard[int]:
+    """Whether `value` (from a peer) is an integer, not a bool, from 0 to below `MAX_INT`."""
+    return type(value) is int and 0 <= value < MAX_INT
 
 
 def _count(value: Any) -> int:
-    """`value` when it is an integer (not a bool) of at least 0; raises ValueError otherwise."""
-    if type(value) is not int or value < 0:
+    """`value` when `is_count`; raises ValueError otherwise."""
+    if not is_count(value):
         raise ValueError("not a count")
     return value
 
@@ -618,7 +636,7 @@ def review_from_dict(data: Any, peer: str) -> PeerReview | None:
         return None
     review_id, session_id, status = data.get("id"), data.get("session_id"), data.get("status")
     created_at = _time(data, "created_at")
-    if type(review_id) is not int or not isinstance(session_id, str):
+    if not is_count(review_id) or not isinstance(session_id, str):
         return None
     if not is_session_id(session_id) or status not in _REVIEW_STATUSES or created_at is None:
         return None
