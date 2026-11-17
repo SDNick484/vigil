@@ -22,5 +22,8 @@ All notable changes to this project are recorded here, in the style of
 - Remote access (v2): optional non-loopback bind (`server.bind`) behind a token (`server.token_file`, mode 0600), bearer auth for API clients, a `/login` page with a signed HttpOnly, SameSite=Strict session cookie for browsers, `server.allowed_hosts`, and no terminal for remote resume.
 - Peers (v2): `[[peers]]` and `machine` in the config, a merged sessions list with a machine column, stale last-known sessions for offline peers (cached in the data dir), peer session pages, Resume forwarded to the owning peer (`POST /peers/{name}/sessions/{id}/resume`), and `GET /api/v1/peers`; httpx is now a runtime dependency.
 
+### Changed
+- Install guide rewritten step by step: install without pipx (a virtual environment), checks after each step, which way to keep vigil running, upgrade, uninstall and troubleshooting; the service files also look for `claude` in `/opt/bin`.
+
 ### Fixed
 - A session started with a local command such as `/model` (or a `!` bash-mode command) is named after the first typed prompt, and command output is no longer taken for a prompt.

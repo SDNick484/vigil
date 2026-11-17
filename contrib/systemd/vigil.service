@@ -14,10 +14,11 @@ Documentation=https://github.com/SDNick484/vigil
 
 [Service]
 Type=simple
-# pipx installs to ~/.local/bin; change this if vigil lives elsewhere.
+# Both install ways in the README put vigil in ~/.local/bin; change this if yours is elsewhere.
 ExecStart=%h/.local/bin/vigil serve
 # vigil needs `claude` (and `tmux`, for the fallback launcher) on PATH to resume sessions.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# /opt/bin is where Gentoo installs Claude Code.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/bin
 Restart=on-failure
 RestartSec=5
 
