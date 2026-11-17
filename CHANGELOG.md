@@ -18,3 +18,4 @@ All notable changes to this project are recorded here, in the style of
 - CLI commands `vigil scan`, `ls`, `show` and `resume`, with `--json` output (`vigil.serialize.session_to_dict`) that the API reuses.
 - Web service (`vigil serve`): JSON API under `/api/v1`, resume and metadata POST actions, a loopback `Host` and same-origin guard, and a transcript watcher that keeps the index current.
 - Web pages: sessions list grouped by project with live search, session detail with last exchange, resume command, chain and label/note/pin/archive editing; htmx vendored, no external requests.
+- Usage report (`vigil usage`, `GET /api/v1/usage`, `GET /api/v1/catalog`, `/usage` page): what you use inside sessions, how you launch `claude` (short flags counted as their long names), and which flags and subcommands of the installed version you have never tried.

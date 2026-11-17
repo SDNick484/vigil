@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Usage{% endblock %}
+{% macro uses(items) %}
+<table>
+  <thead><tr><th>Kind</th><th>Name</th><th>Count</th><th>Last used</th></tr></thead>
+  <tbody>
+    {% for u in items %}
+    <tr><td>{{ u.kind }}</td><td><code>{{ u.name }}</code></td><td>{{ u.count }}</td>
+      <td>{{ u.last_used_at|when }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+{% block content %}
+<h1>Usage</h1>
+
+<section id="in-sessions">
+  <h2>Inside sessions</h2>
+  <form class="search" method="get" action="/usage">
+    <label>Project
+      <select name="project">
+        <option value="">All projects</option>
+        {% for p in projects %}
+        <option value="{{ p.project_key }}" {% if p.project_key == project %}selected{% endif %}>{{ p.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Show</button>
+  </form>
+  <p class="muted">Tools, slash commands, skills, subagents, MCP servers and models counted in your transcripts.</p>
+  {% if report.features %}{{ uses(report.features) }}{% else %}<p>Nothing recorded yet.</p>{% endif %}
+</section>
+
+<section id="how-you-launch">
+  <h2>How you launch claude</h2>
+  {% if not report.history_enabled %}
+  <p>Launch history is off. To count the subcommands and flags you start <code>claude</code> with,
+    set <code>usage.shell_history = true</code> (<code>shell_history = true</code> under
+    <code>[usage]</code>) in vigil's config file and restart vigil. vigil then reads your shell
+    history for <code>claude</code> lines only and keeps flag names and a time, never values or prompts.</p>
+  {% endif %}
+  {% if report.launch_flags %}
+  {{ uses(report.launch_flags) }}
+  {% elif report.history_enabled %}
+  <p>No launches recorded yet.</p>
+  {% endif %}
+  {% if project %}<p class="muted">Launches are not tied to a project, so this section is not filtered.</p>{% endif %}
+</section>
+
+<section id="never-tried">
+  <h2>Never tried</h2>
+  {% if not report.catalog_available %}
+  <p>No catalog: the installed <code>claude</code> was not found, or it did not report its options.</p>
+  {% elif not report.never_used %}
+  <p>You have used every flag and subcommand the installed claude lists.</p>
+  {% else %}
+  <p class="muted">Flags and subcommands of the installed claude that no recorded launch used.
+    {% if not report.history_enabled %}Launch history is off, so only launches started from vigil are seen.{% endif %}</p>
+  <table>
+    <thead><tr><th>Kind</th><th>Name</th><th>Description</th></tr></thead>
+    <tbody>
+      {% for e in report.never_used %}
+      <tr><td>{{ e.kind }}</td>
+        <td><code>{{ e.name }}</code>{% if e.short %} <code>{{ e.short }}</code>{% endif %}</td>
+        <td>{{ e.description }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

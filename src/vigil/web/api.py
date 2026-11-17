@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import vigil
+from vigil.catalog import current_catalog
 from vigil.commands import resume_command
 from vigil.index.db import to_db
 from vigil.index.queries import (
@@ -30,6 +31,7 @@ from vigil.index.queries import (
 )
 from vigil.resume import ResumeRefused, execute, plan_resume
 from vigil.serialize import apply_status, session_to_dict
+from vigil.usage import build_report, catalog_entry_to_dict, refresh_sources, report_to_dict
 from vigil.web import connection, state
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
@@ -82,6 +84,33 @@ class ProjectOut(BaseModel):
     label: str
     session_count: int
     last_activity_at: str | None
+
+
+class FeatureUseOut(BaseModel):
+    kind: str
+    name: str
+    count: int
+    last_used_at: str | None
+
+
+class CatalogEntryOut(BaseModel):
+    kind: Literal["flag", "subcommand", "subcommand_flag"]
+    name: str
+    short: str | None
+    parent: str | None
+    description: str
+
+
+class UsageOut(BaseModel):
+    """`features` from transcripts (overall, or one `project`); `launch_flags` from launches
+    (vigil's resumes and, when enabled, shell history), short flags as their long names;
+    `never_used` the installed claude's flags and subcommands no launch used."""
+
+    features: list[FeatureUseOut]
+    launch_flags: list[FeatureUseOut]
+    never_used: list[CatalogEntryOut]
+    history_enabled: bool
+    catalog_available: bool
 
 
 class HealthOut(BaseModel):
@@ -174,6 +203,34 @@ def projects(request: Request) -> list[dict[str, object]]:
         }
         for row in rows
     ]
+
+
+@router.get("/usage", response_model=UsageOut)
+def usage(
+    request: Request,
+    project: Annotated[str | None, Query(description="a project key (limits `features`)")] = None,
+    since: Annotated[datetime | None, Query(description="active at or after (ISO 8601)")] = None,
+) -> dict[str, object]:
+    """What is used (counts and recency per feature), how `claude` is launched, and what the
+    installed version offers that was never used. Brings the catalog and, when
+    `usage.shell_history` is on, the launch history up to date first."""
+    web = state(request)
+    with connection(request) as conn:
+        refresh_sources(conn, web.config)
+        report = build_report(
+            conn, project_key=project, since=since, history_enabled=web.config.usage.shell_history
+        )
+    return report_to_dict(report)
+
+
+@router.get("/catalog", response_model=list[CatalogEntryOut])
+def catalog(request: Request) -> list[dict[str, object]]:
+    """The flags and subcommands the installed `claude` lists, from its own `--help` (the latest
+    version seen); empty when no `claude` has been found."""
+    with connection(request) as conn:
+        refresh_sources(conn, state(request).config)
+        entries = current_catalog(conn)
+    return [catalog_entry_to_dict(entry) for entry in entries]
 
 
 @router.get("/health", response_model=HealthOut)
