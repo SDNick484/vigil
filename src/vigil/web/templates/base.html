@@ -33,6 +33,10 @@
       try { data = JSON.parse(xhr.responseText); } catch (err) { /* shown as a failure below */ }
       var target = event.detail.target;
       target.replaceChildren();
+      // The row (or detail section) that holds the target also holds the restart confirm step.
+      var scope = target.closest("li.session, section");
+      var confirmStep = scope ? scope.querySelector(".restart-confirm") : null;
+      if (confirmStep && /\/restart-remote$/.test(new URL(xhr.responseURL).pathname)) confirmStep.hidden = true;
       // Only ever to a Claude link: the answer may have come from another machine.
       var link = typeof data.remote_url === "string" && /^https:\/\/claude\.ai\/code\//.test(data.remote_url) ? data.remote_url : null;
       if (data.ok === true && link) {
@@ -44,7 +48,7 @@
         window.location.href = link;
       } else if (data.ok === true && data.pending === true) {
         var page = document.createElement("a");
-        page.href = new URL(xhr.responseURL).pathname.replace(/\/resume$/, "");
+        page.href = new URL(xhr.responseURL).pathname.replace(/\/(resume|restart-remote)$/, "");
         page.textContent = "the session page";
         target.className = "result ok";
         target.append("Started; the Remote Control link is not available yet. Try ", page, " in a moment.");
@@ -60,16 +64,26 @@
       } else {
         target.className = "result refused";
         target.append(data.reason || data.detail || "Request failed (" + xhr.status + ")");
-        if (data.restartable === true) {
-          // Shown once the restart is wired up (it is a separate action).
+        if (data.restartable === true && confirmStep) {
+          // The button opens the confirm step; nothing is stopped until that is confirmed.
           var restart = document.createElement("button");
           restart.type = "button";
           restart.className = "restart";
-          restart.hidden = true;
           restart.textContent = "Restart with Remote Control";
           target.append(" ", restart);
         }
       }
+    });
+  </script>
+  <script>
+    // Restart with Remote Control: the button in a refusal opens the confirm step; Cancel closes
+    // it. Delegated, like the idle fold below, so it survives the live search swapping results.
+    document.addEventListener("click", function (event) {
+      var button = event.target instanceof Element ? event.target.closest("button.restart, button.cancel") : null;
+      if (!button) return;
+      var scope = button.closest("li.session, section");
+      var step = scope ? scope.querySelector(".restart-confirm") : null;
+      if (step) step.hidden = button.classList.contains("cancel");
     });
   </script>
   <script>

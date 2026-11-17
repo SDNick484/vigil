@@ -393,8 +393,13 @@ _LINKING_CLAUDE = """#!{python}
 import datetime, json, os, sys
 with open({log!r}, "a") as handle:
     handle.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
+stopped = os.path.exists({marker!r})
+if "stop" in sys.argv:
+    if {stop_code!r} == 0:
+        open({marker!r}, "w").close()
+    sys.exit({stop_code!r})
 if "agents" in sys.argv:
-    sys.stdout.write({live!r})
+    sys.stdout.write("[]" if stopped else {live!r})
     sys.exit(0)
 if "--bg" in sys.argv and {link!r}:
     record = {{"type": "system", "subtype": "bridge_status", "url": {link!r},
@@ -411,8 +416,10 @@ def install_claude(
     transcript: Path,
     link: str | None,
     live: Sequence[Mapping[str, object]] | None = None,
+    stop_code: int = 0,
 ) -> None:
-    """A fake `claude` that reports `live` for `agents --json` and, when started with `--bg`,
+    """A fake `claude` that reports `live` for `agents --json` (nothing once `stop` has run, which
+    exits `stop_code`) and, when started with `--bg`,
     appends a `bridge_status` line with `link` to `transcript` (as Claude Code would once Remote
     Control is up). It records its argv and cwd like every FakeBin program."""
     env.bin.install("claude", stdout=CLAUDE_BG)
@@ -422,6 +429,8 @@ def install_claude(
             python=sys.executable,
             log=str(env.bin.directory / ".calls" / "claude.jsonl"),
             live=json.dumps(live or []),
+            marker=str(env.bin.directory / ".stopped"),
+            stop_code=stop_code,
             link=link,
             transcript=str(transcript),
             help=CLAUDE_BG,
@@ -545,6 +554,111 @@ def test_remote_resume_of_background_session_without_link_is_restartable(
     assert body["ok"] is False and body["restartable"] is True
     assert "without Remote Control" in body["reason"]
     assert started(vigil_env) == []
+
+
+def claude_calls(env: VigilEnv) -> list[list[str]]:
+    """What the fake `claude` was asked to do, in order, without vigil's probes of what is
+    installed and what is live."""
+    probes = (["--version"], ["--help"])
+    return [
+        c.argv for c in env.bin.calls("claude") if "agents" not in c.argv and c.argv not in probes
+    ]
+
+
+def background_live(folder: Path, **extra: object) -> list[dict[str, object]]:
+    return [{"sessionId": NAMED, "kind": "background", "cwd": str(folder), **extra}]
+
+
+def test_restart_requires_confirm(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path))
+    url = f"/sessions/{NAMED}/restart-remote"
+    assert remote_client.post(url).status_code == 400
+    assert remote_client.post(url, data={"confirm": "no"}).status_code == 400
+    assert remote_client.post(url, data={"confirm": ""}).status_code == 400
+    assert claude_calls(vigil_env) == []  # nothing was stopped or started
+
+
+def test_restart_refuses_interactive(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    live = [{"sessionId": NAMED, "kind": "interactive", "cwd": str(tmp_path)}]
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=live)
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 409
+    assert response.json()["ok"] is False and response.json()["restartable"] is False
+    assert "background" in response.json()["reason"]
+    # A session that is not running at all has nothing to restart either.
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=[])
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 409
+    assert remote_client.post(
+        "/sessions/no-such-session/restart-remote", data={"confirm": "yes"}
+    ).status_code == 404  # fmt: skip
+    assert claude_calls(vigil_env) == []
+
+
+def test_restart_remote_returns_link(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path))
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED}",
+        "opened_terminal": False,
+        "remote_url": LINK,
+        "pending": False,
+    }
+    # Stopped first, then started again with Remote Control, in its folder.
+    assert claude_calls(vigil_env) == [
+        ["stop", NAMED],
+        ["--bg", "--resume", NAMED, "--remote-control"],
+    ]
+
+
+def test_restart_remote_is_pending_without_a_new_link(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(vigil_env, transcript=transcript, link=None, live=background_live(tmp_path))
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 200
+    assert response.json()["remote_url"] is None and response.json()["pending"] is True
+
+
+def test_restart_starts_nothing_when_the_stop_fails(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(
+        vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path), stop_code=1
+    )
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 409
+    assert response.json()["reason"] == "could not stop the session; nothing was restarted"
+    assert started(vigil_env) == []
+
+
+def test_restart_at_the_desk_opens_a_terminal(
+    vigil_env: VigilEnv,
+    web_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path))
+    vigil_env.bin.install("xterm")
+    monkeypatch.setenv("DISPLAY", ":99")
+    response = web_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 200, response.text
+    assert response.json()["opened_terminal"] is True and response.json()["pending"] is False
+    assert started(vigil_env) == [["--bg", "--resume", NAMED, "--remote-control"]]
 
 
 def test_open_button_says_open_for_remote_requests(

@@ -13,7 +13,8 @@ import shutil
 import sqlite3
 import subprocess
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +37,10 @@ _START_TIMEOUT = 20.0
 """How long `execute` waits for `claude --bg` / `tmux new-session -d` to return. Both return as
 soon as the session is started; on a timeout the session is left running and the terminal is
 opened anyway."""
+
+
+_STOP_TIMEOUT = 20.0
+"""How long `stop_session` waits for `claude stop` to return."""
 
 
 TERMINAL_ALLOWED: ContextVar[bool] = ContextVar("vigil_terminal_allowed", default=True)
@@ -319,3 +324,45 @@ def execute(plan: ResumePlan, *, conn: sqlite3.Connection | None = None) -> str:
             if conn is not None and plan.attach[0] == "claude":
                 _record(conn, plan, "attach", plan.attach)
     return shlex.join(plan.attach)
+
+
+def stop_session(
+    session_id: str,
+    live_probe: Callable[[], dict[str, LiveSession]],
+    *,
+    timeout: float = 10.0,
+    poll: float = 0.5,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Stop the background session `session_id` with `claude stop`, then wait (up to `timeout`
+    seconds, looking every `poll`) until `live_probe` no longer lists it.
+
+    This is the one place vigil stops anything, and only for Restart with Remote Control, after the
+    author confirmed. Raises ResumeRefused when `claude stop` cannot be run, is too slow or exits
+    non-zero, or the session is still live after `timeout`; the caller then starts nothing.
+    """
+    if not _SESSION_ID.fullmatch(session_id):
+        raise ResumeRefused(f"not a valid session id: {session_id!r}")
+    refused = ResumeRefused("could not stop the session; nothing was restarted")
+    argv = ["claude", "stop", session_id]
+    try:
+        result = subprocess.run(  # noqa: S603 - argv is built here from a checked id, never a shell
+            argv,
+            capture_output=True,
+            timeout=_STOP_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        log.warning("could not run `%s`", shlex.join(argv), exc_info=True)
+        raise refused from None
+    if result.returncode != 0:
+        log.warning("`%s` exited with %s", shlex.join(argv), result.returncode)
+        raise refused
+    deadline = clock() + timeout
+    while session_id in live_probe():
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise refused
+        sleep(min(poll, remaining))

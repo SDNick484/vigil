@@ -8,16 +8,18 @@ its status from the live sessions, cached for a few seconds (`vigil.web.LiveStat
 
 import os
 import shlex
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import vigil
 from vigil.catalog import current_catalog
+from vigil.claude_cli import Capabilities, LiveSession
 from vigil.commands import resume_command
 from vigil.index.db import to_db
 from vigil.index.queries import (
@@ -40,10 +42,11 @@ from vigil.resume import (
     execute,
     joinable_link,
     plan_resume,
+    stop_session,
 )
 from vigil.serialize import apply_status, session_to_dict
 from vigil.usage import build_report, catalog_entry_to_dict, refresh_sources, report_to_dict
-from vigil.web import connection, state
+from vigil.web import WebState, connection, state
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
 actions = APIRouter(tags=["actions"])
@@ -335,7 +338,6 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
     shows up (waiting up to `resume.remote_link_timeout`) after the session is started here.
     """
     web = state(request)
-    remote = not TERMINAL_ALLOWED.get()
     with connection(request) as conn:
         row = get_session(conn, session_id)
         if row is None:
@@ -343,21 +345,91 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
         # Fresh, not cached: never start a second process on a session that just opened.
         caps, live = web.live.get(fresh=True)
         try:
-            plan = plan_resume(row, caps, live, web.config.resume, os.environ)
-            if remote and plan.start is None:
-                # Live with a link (plan_resume refuses it without one): start nothing.
-                return _resumed(shlex.join(plan.attach), plan, joinable_link(row, live))
-            launched_at = datetime.now(UTC)
-            attach = execute(plan, conn=conn)
+            started = _start(web, conn, row, caps, live)
         except ResumeRefused as refused:
             return _refusal(409, refused.reason, restartable=refused.restartable)
+    return _answer(web, row, started)
+
+
+class _Started(NamedTuple):
+    plan: ResumePlan
+    attach: str
+    launched_at: datetime | None
+    """When the session was started, or None when it was already running and nothing was."""
+    link: str | None
+    """The link of a session that was already running."""
+
+
+def _start(
+    web: WebState,
+    conn: sqlite3.Connection,
+    row: SessionRow,
+    caps: Capabilities,
+    live: dict[str, LiveSession],
+) -> _Started:
+    """Plan the resume of `row` against `live` and carry it out. Raises ResumeRefused."""
+    plan = plan_resume(row, caps, live, web.config.resume, os.environ)
+    if not TERMINAL_ALLOWED.get() and plan.start is None:
+        # Live with a link (plan_resume refuses it without one): start nothing.
+        return _Started(plan, shlex.join(plan.attach), None, joinable_link(row, live))
+    launched_at = datetime.now(UTC)
+    return _Started(plan, execute(plan, conn=conn), launched_at, None)
+
+
+def _answer(web: WebState, row: SessionRow, started: _Started) -> dict[str, object]:
+    """The answer to a resume once `started` happened: from another machine, wait for the link of
+    a session that was just started."""
+    plan, attach, launched_at, link = started
+    if launched_at is None:
+        return _resumed(attach, plan, link)
     web.live.clear()
-    if not remote:
+    if TERMINAL_ALLOWED.get():
         return _resumed(attach, plan, None)
     link = wait_for_remote_url(
         Path(row.transcript_path), launched_at, web.config.resume.remote_link_timeout
     )
     return _resumed(attach, plan, link, pending=link is None)
+
+
+@actions.post(
+    "/sessions/{session_id}/restart-remote",
+    response_model=ResumeOut,
+    responses={
+        400: {"model": RefusalOut},
+        404: {"model": RefusalOut},
+        409: {"model": RefusalOut},
+    },
+)
+def restart_remote(
+    request: Request, session_id: str, confirm: Annotated[str | None, Form()] = None
+) -> dict[str, object] | JSONResponse:
+    """Stop a session running in the background and start it again with Remote Control, for a
+    session that has no link to join by. Interrupts whatever it is doing, so the form must say
+    `confirm=yes` (400 otherwise). 409 unless the session is running in the background (nothing
+    is touched), or when it cannot be stopped (nothing is started).
+
+    After the stop it is the resume of a session that is not running: from another machine no
+    terminal is opened, and the answer is that of a resume (the link, or `pending`)."""
+    if confirm != "yes":
+        return _refusal(400, "restarting needs confirm=yes")
+    web = state(request)
+    with connection(request) as conn:
+        row = get_session(conn, session_id)
+        if row is None:
+            return _refusal(404, _no_session(session_id))
+        _, live = web.live.get(fresh=True)
+        running = live.get(row.session_id)
+        if running is None or running.kind != "background":
+            return _refusal(
+                409, "only a session running in the background can be restarted", restartable=False
+            )
+        try:
+            stop_session(row.session_id, lambda: web.live.get(fresh=True)[1])
+            caps, live = web.live.get(fresh=True)
+            started = _start(web, conn, row, caps, live)
+        except ResumeRefused as refused:
+            return _refusal(409, refused.reason, restartable=refused.restartable)
+    return _answer(web, row, started)
 
 
 def _resumed(
@@ -387,6 +459,30 @@ def resume_on_peer(
     request."""
     try:
         return state(request).peers.resume(peer, session_id)
+    except ResumeForwardError as refused:
+        return _refusal(
+            refused.status,
+            refused.reason,
+            restartable=refused.restartable if refused.status == 409 else None,
+        )
+
+
+@actions.post(
+    "/peers/{peer}/sessions/{session_id}/restart-remote",
+    response_model=ForwardedResumeOut,
+    responses={404: {"model": RefusalOut}, 409: {"model": RefusalOut}, 502: {"model": RefusalOut}},
+)
+def restart_on_peer(
+    request: Request, peer: str, session_id: str, confirm: Annotated[str | None, Form()] = None
+) -> dict[str, object] | JSONResponse:
+    """Restart a session of the peer called `peer` with Remote Control: forwarded, with
+    `confirm=yes`, to that peer's own restart action (`vigil.peers.forward_restart`); asked for
+    here without that confirmation it is refused with 400 and nothing is sent. Answers as
+    `resume_on_peer` does."""
+    if confirm != "yes":
+        return _refusal(400, "restarting needs confirm=yes")
+    try:
+        return state(request).peers.restart(peer, session_id)
     except ResumeForwardError as refused:
         return _refusal(
             refused.status,

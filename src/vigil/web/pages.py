@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from vigil.claude_cli import LiveSession
 from vigil.commands import resume_command
 from vigil.index.queries import SessionRow, chain, get_session, list_projects, list_sessions
 from vigil.peers import (
@@ -88,6 +89,22 @@ def resume_url(row: SessionRow) -> str:
     return session_url(row) + "/resume"
 
 
+def restart_url(row: SessionRow) -> str:
+    """Where Restart with Remote Control on `row` posts: this machine's restart action, or the
+    one forwarding to its peer."""
+    return session_url(row) + "/restart-remote"
+
+
+def busy_keys(rows: list[SessionRow], live: dict[str, LiveSession]) -> set[str]:
+    """The `row_key` of each of this machine's own `rows` whose live session is working now.
+    A peer's rows are never in it: what a peer sent says nothing about that."""
+    return {
+        row_key(row)
+        for row in rows
+        if peer_of(row) is None and (running := live.get(row.session_id)) and running.busy
+    }
+
+
 templates = Jinja2Templates(directory=WEB_DIR / "templates")
 templates.env.filters["when"] = _when
 templates.env.globals["session_name"] = display_name
@@ -95,6 +112,7 @@ templates.env.globals["preview"] = _preview
 templates.env.globals["peer_of"] = peer_of
 templates.env.globals["session_url"] = session_url
 templates.env.globals["resume_url"] = resume_url
+templates.env.globals["restart_url"] = restart_url
 templates.env.globals["row_key"] = row_key
 
 
@@ -233,6 +251,7 @@ def sessions_page(
         "machines": bool(web.config.peers),
         "offline": offline,
         "open_links": open_links(rows),
+        "busy": busy_keys(rows, live),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     if request.headers.get("hx-request") == "true":
@@ -261,6 +280,7 @@ def session_page(request: Request, session_id: str) -> Any:
         "command": resume_command(row),
         "machine": local_machine(web.config),
         "open_links": open_links([row]),
+        "busy": busy_keys([row], live),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)
@@ -286,6 +306,7 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         "machine": peer,
         "result": result,
         "open_links": open_links([row]),
+        "busy": set(),
         "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)

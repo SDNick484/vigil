@@ -545,6 +545,64 @@ def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> No
     assert refused.value.restartable is False
 
 
+def test_forward_restart(tmp_path: Path) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    seen: list[httpx.Request] = []
+    answer: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(answer.pop("status", 200), json=answer)
+
+    network = Network(hosts={PEER_B_HOST: handle})
+    answer.update(ok=True, attach="claude attach x", opened_terminal=False, remote_url=link)
+    forwarded = peers.forward_restart(peer, HANDMADE, transport=network.transport())
+    assert forwarded == {
+        "ok": True,
+        "attach": "claude attach x",
+        "opened_terminal": False,
+        "remote_url": link,
+        "pending": False,
+        "machine": "peer-b",
+    }
+    (request,) = seen
+    assert request.method == "POST"
+    assert request.url.path == f"/sessions/{HANDMADE}/restart-remote"
+    assert request.read() == b"confirm=yes"  # the peer insists on the confirmation
+    assert request.headers["authorization"] == f"Bearer {TOKEN_B}"
+    # Same handling of the answer as a resume: foreign links dropped, refusals carried over.
+    answer.update(ok=True, attach="claude attach x", remote_url="https://evil.example/x")
+    forwarded = peers.forward_restart(peer, HANDMADE, transport=network.transport())
+    assert forwarded["remote_url"] is None
+    answer.update(status=409, ok=False, reason="could not stop the session", restartable=False)
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_restart(peer, HANDMADE, transport=network.transport())
+    assert refused.value.status == 409
+    assert refused.value.reason == "peer-b: could not stop the session"
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_restart(peer, "-rf", transport=network.transport())
+    assert refused.value.status == 404
+    assert len(seen) == 3  # a bad session id sends nothing
+
+
+CONFIRM = {"confirm": "yes"}
+
+
+def test_restart_forwarded_to_owner(machines: Machines) -> None:
+    laptop, network = machines.laptop, machines.network
+    # Without the confirmation nothing is sent to the peer.
+    assert laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/restart-remote").status_code == 400
+    assert network.requests == []
+    response = laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/restart-remote", data=CONFIRM)
+    # peer-b answers for itself: it knows no such live session, so it refuses the restart.
+    assert response.status_code == 409, response.text
+    assert response.json()["reason"].startswith("peer-b: ")
+    assert response.json()["restartable"] is False
+    assert any(r.url.path == f"/sessions/{HANDMADE}/restart-remote" for r in network.requests)
+    assert laptop.post("/peers/nobody/sessions/x/restart-remote", data=CONFIRM).status_code == 404
+
+
 def test_resume_forward_refused_by_peer(machines: Machines, tmp_path: Path) -> None:
     # laptop holds a wrong token for peer-b: peer-b refuses it, and laptop says so.
     write_token(tmp_path / "laptop_peer_b_token", TOKEN_D)

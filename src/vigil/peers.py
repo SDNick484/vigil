@@ -367,13 +367,33 @@ def forward_resume(
     says it started the session but the link is not there yet). Raises ResumeForwardError:
     404 for an id that is not a session id, the peer's own 404 or 409 refusal (reason prefixed
     with the peer's name), else 502 when the peer cannot be reached or refuses the request."""
+    return _forward_launch(peer, session_id, "resume", None, transport)
+
+
+def forward_restart(
+    peer: Peer, session_id: str, *, transport: httpx.BaseTransport | None = None
+) -> dict[str, object]:
+    """Ask `peer` to stop its background session `session_id` and start it again with Remote
+    Control (`POST /sessions/{id}/restart-remote`, with the confirmation the peer requires, and the
+    peer's token). Answers and raises as `forward_resume` does."""
+    return _forward_launch(peer, session_id, "restart-remote", {"confirm": "yes"}, transport)
+
+
+def _forward_launch(
+    peer: Peer,
+    session_id: str,
+    action: str,
+    form: dict[str, str] | None,
+    transport: httpx.BaseTransport | None,
+) -> dict[str, object]:
+    """`forward_resume` and `forward_restart`: post `action` for `session_id` to `peer`."""
     if not _SESSION_ID.fullmatch(session_id):
         raise ResumeForwardError(404, f"not a session id: {session_id!r}")
     timeout = httpx.Timeout(RESUME_TIMEOUT, connect=PEER_TIMEOUT)
-    path = f"/sessions/{quote(session_id, safe='')}/resume"
+    path = f"/sessions/{quote(session_id, safe='')}/{action}"
     try:
         with _client(timeout, transport) as client:
-            response = client.send(_request(client, peer, "POST", path))
+            response = client.send(_request(client, peer, "POST", path, data=form))
     except PeerError as error:
         raise ResumeForwardError(502, f"{peer.name}: {error}") from None
     except httpx.TimeoutException:
@@ -472,13 +492,25 @@ class PeerHub:
     def resume(self, name: str, session_id: str) -> dict[str, object]:
         """`forward_resume` to the peer called `name`; 404 (ResumeForwardError) when there is
         none. The peer's sessions are fetched again next time, for their new status."""
-        peer = self.peer(name)
-        if peer is None:
-            raise ResumeForwardError(404, f"no peer called {name!r}")
+        peer = self._peer_or_404(name)
         try:
             return forward_resume(peer, session_id, transport=self.transport)
         finally:
             self.forget(name)
+
+    def restart(self, name: str, session_id: str) -> dict[str, object]:
+        """`forward_restart` to the peer called `name`, as `resume` does."""
+        peer = self._peer_or_404(name)
+        try:
+            return forward_restart(peer, session_id, transport=self.transport)
+        finally:
+            self.forget(name)
+
+    def _peer_or_404(self, name: str) -> Peer:
+        peer = self.peer(name)
+        if peer is None:
+            raise ResumeForwardError(404, f"no peer called {name!r}")
+        return peer
 
 
 def _sort_key(row: SessionRow) -> tuple[bool, float, str]:

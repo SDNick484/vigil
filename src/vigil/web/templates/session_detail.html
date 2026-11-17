@@ -27,6 +27,7 @@
     <button type="submit">Resume</button>
     <span class="result" id="resume-result" aria-live="polite"></span>
   </form>
+  {% if row.status == "background" and not (result and result.stale) %}{% with s = row, result_id = "resume-result" %}{% include "_restart_confirm.html" %}{% endwith %}{% endif %}
 </section>
 
 <section>

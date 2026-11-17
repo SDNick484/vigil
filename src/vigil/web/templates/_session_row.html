@@ -23,4 +23,5 @@
     </form>
     <span class="result" id="resume-{{ key }}" aria-live="polite"></span>
   </div>
+  {% if s.status == "background" and not s.stale %}{% with result_id = "resume-" ~ key %}{% include "_restart_confirm.html" %}{% endwith %}{% endif %}
 </li>

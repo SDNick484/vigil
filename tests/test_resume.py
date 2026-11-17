@@ -24,6 +24,7 @@ from vigil.resume import (
     execute,
     joinable_link,
     plan_resume,
+    stop_session,
 )
 
 pytestmark = pytest.mark.usefixtures("proc_version")
@@ -486,3 +487,66 @@ def test_wait_for_remote_url_sees_appended_line(tmp_path: Path) -> None:
     found = wait_for_remote_url(transcript, LAUNCH, 30.0, clock=time_.clock, sleep=time_.sleep)
     assert found == new
     assert time_.sleeps == [0.5, 0.5]  # returned as soon as it appeared
+
+
+class Clock:
+    """A fake clock whose sleep advances it, so polling needs no real waiting."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_stop_session_waits_until_gone(fake_bin: FakeBin, env: dict[str, str]) -> None:
+    clock = Clock()
+    probes: list[float] = []
+
+    def probe() -> dict[str, LiveSession]:
+        probes.append(clock.now)
+        gone = len(probes) > 3
+        return {} if gone else {SID: LiveSession(SID, "background", None, "/x")}
+
+    stop_session(SID, probe, clock=clock, sleep=clock.sleep)
+    assert [call.argv for call in fake_bin.calls("claude")] == [["stop", SID]]
+    assert probes == [0.0, 0.5, 1.0, 1.5]
+
+
+def test_stop_session_refuses_when_still_live(fake_bin: FakeBin, env: dict[str, str]) -> None:
+    clock = Clock()
+
+    def probe() -> dict[str, LiveSession]:
+        return {SID: LiveSession(SID, "background", None, "/x")}
+
+    with pytest.raises(ResumeRefused) as refused:
+        stop_session(SID, probe, timeout=2.0, clock=clock, sleep=clock.sleep)
+    assert refused.value.reason == "could not stop the session; nothing was restarted"
+    assert refused.value.restartable is False
+    assert clock.now >= 2.0
+    # Only `claude stop` ran: nothing was started.
+    assert [call.argv for call in fake_bin.calls("claude")] == [["stop", SID]]
+
+
+def test_stop_session_refuses_on_exit_code(fake_bin: FakeBin) -> None:
+    fake_bin.install("claude", exit_code=1)
+    probed: list[None] = []
+
+    def probe() -> dict[str, LiveSession]:
+        probed.append(None)
+        return {}
+
+    with pytest.raises(ResumeRefused, match="could not stop the session; nothing was restarted"):
+        stop_session(SID, probe)
+    assert probed == []  # no point looking when the stop failed
+
+
+def test_stop_session_refuses_a_bad_id_and_a_missing_claude(fake_bin: FakeBin) -> None:
+    with pytest.raises(ResumeRefused, match="not a valid session id"):
+        stop_session("--all", dict)
+    with pytest.raises(ResumeRefused, match="could not stop the session"):
+        stop_session(SID, dict)  # no `claude` on PATH
+    assert fake_bin.calls("claude") == []

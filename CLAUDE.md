@@ -19,6 +19,7 @@ CI runs exactly this; run it before every commit:
 - No code or concepts specific to any private tool; other tools integrate through the public API.
 - v1 binds to `127.0.0.1` only; any other bind address is a startup error.
 - Resume may only run `claude` (or `tmux` in fallback) against a session ID present in the index. The only extra flags are those in `resume.default_flags`, allow-listed to `--remote-control`, `--model`, `--effort`, `--permission-mode`, `--name`.
+- vigil may run `claude stop <id>` only for Restart with Remote Control, after the author confirms.
 - vigil adds `--remote-control` to every session it starts.
 - Indexed transcript text is truncated to 500 characters per field; full transcripts are read from disk on demand and never copied elsewhere.
 - Shell history: opt-in (`usage.shell_history`, default `false`); keep only `claude` invocations; store subcommand and flag names and a timestamp only, never values or prompts.

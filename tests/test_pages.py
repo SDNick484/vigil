@@ -422,6 +422,48 @@ def test_resume_answer_handler_follows_link_and_offers_restart(web_client: TestC
         "the Remote Control link is not available yet",
         "data.restartable",
         "Restart with Remote Control",
-        "restart.hidden = true",
+        "restart-confirm",
+        "button.restart",
     ):
         assert text in page, text
+
+
+CONFIRM_COPY = "Restarting stops this session and interrupts anything it is doing."
+BUSY_COPY = "This session is working right now. Restarting stops it mid-task."
+
+
+def make_busy(client: TestClient, session_id: str, *, busy: bool) -> None:
+    live = {session_id: LiveSession(session_id, "background", None, None, busy=busy)}
+    client.app.state.vigil.live.get = lambda **_: (CAPS, live)  # type: ignore[attr-defined]
+
+
+def test_restart_confirm_step_on_background_row_and_detail(web_client: TestClient) -> None:
+    # Nothing to restart on an idle session.
+    assert "restart-remote" not in row_html(web_client.get("/").text, f"row-{NAMED}")
+    assert "/restart-remote" not in web_client.get(f"/sessions/{NAMED}").text.split("<script>")[0]
+
+    make_busy(web_client, NAMED, busy=False)
+    page = web_client.get("/").text
+    row = row_html(page, f"row-{NAMED}")
+    assert f'action="/sessions/{NAMED}/restart-remote"' in row
+    assert 'name="confirm" value="yes"' in row
+    assert CONFIRM_COPY in row and BUSY_COPY not in row
+    assert ">Restart</button>" in row and ">Cancel</button>" in row
+    assert 'class="restart-confirm" hidden' in row  # opened by the answer's restart button
+    detail = web_client.get(f"/sessions/{NAMED}").text
+    assert f'action="/sessions/{NAMED}/restart-remote"' in detail
+    assert CONFIRM_COPY in detail and BUSY_COPY not in detail
+
+    # A working session gets the plain warning.
+    make_busy(web_client, NAMED, busy=True)
+    assert BUSY_COPY in row_html(web_client.get("/").text, f"row-{NAMED}")
+    assert BUSY_COPY in web_client.get(f"/sessions/{NAMED}").text
+    # Only that session's: another background row beside it has none.
+    live = {
+        NAMED: LiveSession(NAMED, "background", None, None, busy=True),
+        FORKED: LiveSession(FORKED, "background", None, None, busy=False),
+    }
+    web_client.app.state.vigil.live.get = lambda **_: (CAPS, live)  # type: ignore[attr-defined]
+    page = web_client.get("/").text
+    assert BUSY_COPY in row_html(page, f"row-{NAMED}")
+    assert BUSY_COPY not in row_html(page, f"row-{FORKED}")
