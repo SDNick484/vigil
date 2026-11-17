@@ -16,3 +16,4 @@ All notable changes to this project are recorded here, in the style of
 - Opt-in launch history from shell history (`vigil.history`): bash, zsh and fish history, `claude` invocations only, subcommand and flag names only.
 - Resume launcher (`vigil.resume`, `vigil.terminal`): `claude --bg` with tmux fallback, terminal detection (config template, WSL Windows Terminal, `$TERMINAL`, known terminals), refusals for open sessions, missing folders and missing tools.
 - CLI commands `vigil scan`, `ls`, `show` and `resume`, with `--json` output (`vigil.serialize.session_to_dict`) that the API reuses.
+- Web service (`vigil serve`): JSON API under `/api/v1`, resume and metadata POST actions, a loopback `Host` and same-origin guard, and a transcript watcher that keeps the index current.
