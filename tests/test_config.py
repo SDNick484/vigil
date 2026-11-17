@@ -83,6 +83,26 @@ def test_disallowed_flag_in_equals_form_or_after_allowed_one_raises(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
+    "flags",
+    [
+        '["--permission-mode", "bypassPermissions"]',
+        '["--model", "a b"]',
+        '["--worktree=x"]',
+        '["--effort"]',
+    ],
+)
+def test_default_flags_value_checked(tmp_path: Path, flags: str) -> None:
+    with pytest.raises(ConfigError, match="resume.default_flags"):
+        load_config(write(tmp_path, f"[resume]\ndefault_flags = {flags}\n"))
+
+
+def test_default_flags_error_names_the_flag_and_why(tmp_path: Path) -> None:
+    path = write(tmp_path, '[resume]\ndefault_flags = ["--permission-mode", "bypassPermissions"]\n')
+    with pytest.raises(ConfigError, match="--permission-mode bypassPermissions is not allowed"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "port = '7787'",

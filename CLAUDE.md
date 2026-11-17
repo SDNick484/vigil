@@ -18,7 +18,7 @@ CI runs exactly this; run it before every commit:
 - vigil never writes, renames or deletes anything under the Claude home (`~/.claude` or the configured `claude_home`). Tests assert this with a read-only fixture tree.
 - No code or concepts specific to any private tool; other tools integrate through the public API.
 - v1 binds to `127.0.0.1` only; any other bind address is a startup error.
-- Resume may only run `claude` (or `tmux` in fallback) against a session ID present in the index. The only extra flags are those in `resume.default_flags`, allow-listed to `--remote-control`, `--model`, `--effort`, `--permission-mode`, `--name`.
+- Resume may only run `claude` (or `tmux` in fallback) against a session ID present in the index. The only extra flags are those in `resume.default_flags`, and every flag vigil adds to a `claude` command line (config, launcher, review suggestions) goes through `vigil.flags`: `--remote-control`, `--name`, `--model`, `--effort`, `--permission-mode` (never `bypassPermissions`), `--agent`, `--worktree`, `--chrome`, `--no-chrome`, `--ide`, `--verbose`, `--brief`, each with a value rule; nothing else is allowed.
 - vigil may run `claude stop <id>` only for Restart with Remote Control, after the author confirms.
 - vigil adds `--remote-control` to every session it starts.
 - Indexed transcript text is truncated to 500 characters per field; full transcripts are read from disk on demand and never copied elsewhere.

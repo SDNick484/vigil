@@ -8,13 +8,10 @@ from pathlib import Path
 from typing import Any, Literal, cast, get_args
 from urllib.parse import urlsplit
 
+from vigil.flags import FlagRefused, check
 from vigil.paths import config_path
 
 Launcher = Literal["auto", "bg", "tmux"]
-
-ALLOWED_FLAGS: frozenset[str] = frozenset(
-    {"--remote-control", "--model", "--effort", "--permission-mode", "--name"}
-)
 
 
 class ConfigError(Exception):
@@ -96,15 +93,11 @@ def _string_list(value: Any, name: str) -> tuple[str, ...]:
 
 
 def _validate_flags(flags: tuple[str, ...]) -> None:
-    """Allow only allow-listed flags, each optionally followed by value tokens."""
-    seen_flag = False
-    for token in flags:
-        if token.startswith("-"):
-            if token.split("=", 1)[0] not in ALLOWED_FLAGS:
-                raise ConfigError(f"resume.default_flags: flag not allowed: {token}")
-            seen_flag = True
-        elif not seen_flag:
-            raise ConfigError(f"resume.default_flags: value without a flag: {token}")
+    """Allow only flags `vigil.flags` lists, each with a value its rule accepts."""
+    try:
+        check(flags)
+    except FlagRefused as error:
+        raise ConfigError(f"resume.default_flags: {error.reason}") from error
 
 
 def _parse_resume(raw: dict[str, Any]) -> ResumeConfig:

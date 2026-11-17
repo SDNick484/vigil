@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Literal
 
 from vigil.claude_cli import Capabilities, LiveSession
-from vigil.config import ALLOWED_FLAGS, ResumeConfig
+from vigil.config import ResumeConfig
+from vigil.flags import FlagRefused, check
 from vigil.index.queries import SessionRow, record_launch
 from vigil.terminal import terminal_argv
 from vigil.transcript import find_remote_url
@@ -97,16 +98,12 @@ def _which(name: str, env: Mapping[str, str]) -> str | None:
 
 
 def _checked_flags(flags: tuple[str, ...]) -> list[str]:
-    """The default flags, re-checked against the allow-list (config loading checks them too)."""
-    seen_flag = False
-    for token in flags:
-        if token.startswith("-"):
-            if token.split("=", 1)[0] not in ALLOWED_FLAGS:
-                raise ResumeRefused(f"resume.default_flags: flag not allowed: {token}")
-            seen_flag = True
-        elif not seen_flag:
-            raise ResumeRefused(f"resume.default_flags: value without a flag: {token}")
-    return list(flags)
+    """The default flags, re-checked against `vigil.flags` (config loading checks them too) and
+    normalized to one token per flag and per value."""
+    try:
+        return check(flags)
+    except FlagRefused as error:
+        raise ResumeRefused(f"resume.default_flags: {error.reason}") from error
 
 
 def joinable_link(session: SessionRow, live: dict[str, LiveSession]) -> str | None:

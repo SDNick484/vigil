@@ -187,12 +187,20 @@ def test_launcher_forced_bg_without_bg_refused(
 def test_default_flags_appended_in_order(workdir: Path, env: dict[str, str]) -> None:
     flags = ("--model", "opus", "--remote-control", "--permission-mode=plan", "--name", "x y")
     plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, ResumeConfig(flags), env)
-    assert plan.start == ["claude", "--bg", "--resume", SID, *flags]
+    # `--flag=value` is normalized to separate tokens; the rest keep their order.
+    expected = ["--model", "opus", "--remote-control", "--permission-mode", "plan", "--name", "x y"]
+    assert plan.start == ["claude", "--bg", "--resume", SID, *expected]
 
 
 def test_disallowed_flag_refused(workdir: Path, env: dict[str, str]) -> None:
     cfg = ResumeConfig(default_flags=("--dangerously-skip-permissions",))
-    with pytest.raises(ResumeRefused, match="flag not allowed"):
+    with pytest.raises(ResumeRefused, match="flag not allowed: --dangerously-skip-permissions"):
+        plan_resume(make_session(str(workdir)), ALL_CAPS, {}, cfg, env)
+
+
+def test_flag_value_refused(workdir: Path, env: dict[str, str]) -> None:
+    cfg = ResumeConfig(default_flags=("--permission-mode", "bypassPermissions"))
+    with pytest.raises(ResumeRefused, match="bypassPermissions is not allowed"):
         plan_resume(make_session(str(workdir)), ALL_CAPS, {}, cfg, env)
 
 
