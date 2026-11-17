@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -10,7 +12,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import LOOPBACK_URL, VigilEnv, freeze_tree
+from tests.conftest import LOOPBACK_URL, VigilEnv, freeze_tree, thaw_tree
 from tests.test_api import (
     CLAUDE_BG,
     LINK,
@@ -23,7 +25,7 @@ from vigil.config import load_config
 from vigil.index.db import connect
 from vigil.index.scanner import scan
 from vigil.review.runner import STOPPED
-from vigil.review.schema import Advice, Suggestion
+from vigil.review.schema import Advice, FileTarget, Suggestion
 from vigil.review.store import INTERRUPTED, finish, get_review
 from vigil.web import WebState
 from vigil.web.app import create_app
@@ -533,3 +535,154 @@ def test_acting_on_suggestions_never_writes_under_the_claude_home(
     for action in ("resume", "start-new", "always-use"):
         response = web_client.post(f"/reviews/{review_id}/suggestions/0/{action}")
         assert response.status_code == 200, (action, response.text)
+
+
+# Acting on project file suggestions (Task 9): Show change previews the diff, Apply writes it
+# only when the file is as previewed.
+
+CHANGED = "the file changed since the preview; show the change again"
+
+
+def file_card(
+    target: FileTarget, text: str | None = None, settings: dict[str, Any] | None = None
+) -> Suggestion:
+    return Suggestion(
+        kind="file",
+        title="Change a file",
+        why="why",
+        evidence="turn 3",
+        flag_name=None,
+        flag_value=None,
+        file_target=target,
+        file_text=text,
+        file_settings=settings,
+    )
+
+
+def file_review(env: VigilEnv, *cards: Suggestion) -> int:
+    conn = connect(env.index)
+    review_id = insert(conn)
+    finish(conn, review_id, suggestions=list(cards), advice=[], cost_usd=0.1)
+    conn.close()
+    return review_id
+
+
+def before_hash(fragment: str) -> str:
+    found = re.search(r'name="before_hash" value="([^"]*)"', fragment)
+    assert found is not None, fragment
+    return found.group(1)
+
+
+@pytest.fixture
+def project(vigil_env: VigilEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The session's folder, a project folder that is not in git."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    return folder
+
+
+def test_show_change_then_apply(vigil_env: VigilEnv, web_client: TestClient, project: Path) -> None:
+    (project / ".claude").mkdir()
+    settings = project / ".claude" / "settings.json"
+    settings.write_text('{"cleanupPeriodDays": 30}\n')
+    review_id = file_review(
+        vigil_env,
+        file_card("project_claude_md", "Run the tests <first>."),
+        file_card("project_settings", settings={"cleanupPeriodDays": 7, "model": "opus"}),
+    )
+    page = web_client.get(f"/sessions/{NAMED}/reviews/{review_id}").text
+    for index in (0, 1):
+        assert f'hx-get="/reviews/{review_id}/suggestions/{index}/change"' in page
+    assert "Show change" in page
+    assert "/apply" not in page  # only after the preview
+
+    fragment = web_client.get(f"/reviews/{review_id}/suggestions/0/change")
+    assert fragment.status_code == 200, fragment.text
+    assert "+Run the tests &lt;first&gt;." in fragment.text
+    assert f'hx-post="/reviews/{review_id}/suggestions/0/apply"' in fragment.text
+    assert before_hash(fragment.text) == "absent"
+    assert not (project / "CLAUDE.md").exists()  # a preview writes nothing
+
+    response = web_client.post(
+        f"/reviews/{review_id}/suggestions/0/apply", data={"before_hash": "absent"}
+    )
+    assert response.status_code == 200, response.text
+    target = project.resolve() / "CLAUDE.md"
+    assert response.json() == {"ok": True, "path": str(target)}
+    assert target.read_text() == "Run the tests <first>.\n"
+
+    fragment = web_client.get(f"/reviews/{review_id}/suggestions/1/change").text
+    assert "Already set, left alone: cleanupPeriodDays (currently 30)" in fragment
+    assert "+  &#34;model&#34;: &#34;opus&#34;" in fragment
+    response = web_client.post(
+        f"/reviews/{review_id}/suggestions/1/apply", data={"before_hash": before_hash(fragment)}
+    )
+    assert response.status_code == 200, response.text
+    assert json.loads(settings.read_text()) == {"cleanupPeriodDays": 30, "model": "opus"}
+
+
+def test_apply_hash_mismatch_409(
+    vigil_env: VigilEnv, web_client: TestClient, project: Path, tmp_path: Path
+) -> None:
+    (project / "CLAUDE.md").write_text("One.\n")
+    review_id = file_review(
+        vigil_env, file_card("project_claude_md", "Two."), flag_card("--model", "opus")
+    )
+    url = f"/reviews/{review_id}/suggestions/0"
+    previewed = before_hash(web_client.get(f"{url}/change").text)
+    (project / "CLAUDE.md").write_text("One, edited.\n")
+
+    for sent in (previewed, "absent", ""):
+        response = web_client.post(f"{url}/apply", data={"before_hash": sent})
+        assert response.status_code == 409, sent
+        assert response.json() == {"ok": False, "reason": CHANGED}
+    assert (project / "CLAUDE.md").read_text() == "One, edited.\n"
+
+    # Not a file suggestion, or no such suggestion.
+    response = web_client.post(
+        f"/reviews/{review_id}/suggestions/1/apply", data={"before_hash": ""}
+    )
+    assert (response.status_code, response.json()["reason"]) == (409, "not a file suggestion")
+    assert web_client.get(f"/reviews/{review_id}/suggestions/2/change").status_code == 404
+
+    # The session's folder is gone.
+    set_cwd(vigil_env, tmp_path / "gone")
+    response = web_client.get(f"{url}/change")
+    assert response.status_code == 409
+    assert response.json()["reason"].startswith("folder no longer exists")
+
+
+def test_user_target_copy_only(vigil_env: VigilEnv, web_client: TestClient, project: Path) -> None:
+    review_id = file_review(
+        vigil_env,
+        file_card("user_claude_md", "Be brief."),
+        file_card("user_settings", settings={"model": "opus"}),
+        file_card("project_settings", settings={"hooks": {"Stop": []}}),
+    )
+    freeze_tree(vigil_env.claude_home)
+    try:
+        page = web_client.get(f"/sessions/{NAMED}/reviews/{review_id}").text
+        for index in (0, 1, 2):
+            assert f"/reviews/{review_id}/suggestions/{index}/change" not in page
+            assert f"/reviews/{review_id}/suggestions/{index}/apply" not in page
+        assert str(vigil_env.claude_home / "CLAUDE.md") in page
+        assert str(vigil_env.claude_home / "settings.json") in page
+        assert 'class="copy" data-copy="Be brief."' in page
+        assert "&#34;model&#34;: &#34;opus&#34;" in page
+        assert "hooks.Stop" in page  # why the project card is copy-only
+        assert page.count(">Copy</button>") == 3
+
+        for index in (0, 1, 2):
+            response = web_client.post(
+                f"/reviews/{review_id}/suggestions/{index}/apply", data={"before_hash": "absent"}
+            )
+            assert response.status_code == 409, index
+        # The Show change fragment of a refused card is the copy-only block.
+        fragment = web_client.get(f"/reviews/{review_id}/suggestions/0/change").text
+        assert "data-copy" in fragment
+        assert "before_hash" not in fragment
+    finally:
+        thaw_tree(vigil_env.claude_home)
+    assert not (project / ".claude").exists()

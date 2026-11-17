@@ -23,12 +23,9 @@
     {% if suggestion.evidence %}<p class="muted">Evidence: {{ suggestion.evidence }}</p>{% endif %}
     {% if suggestion.kind == "flag" %}
     <p><code>{{ suggestion.flag_name }}{% if suggestion.flag_value %} {{ suggestion.flag_value }}{% endif %}</code></p>
-    {% elif suggestion.kind == "file" %}
-    <p class="muted">{{ suggestion.file_target }}</p>
-    <pre>{% if suggestion.file_settings is not none %}{{ suggestion.file_settings|tojson(2) }}{% else %}{{ suggestion.file_text }}{% endif %}</pre>
     {% endif %}
     {# Per-card actions, keyed by (review.id, index): `_suggestion_actions.html` gets `review`,
-       `suggestion`, `index` and `catalog`. #}
+       `suggestion`, `index` and `catalog`. It also shows a file suggestion's text. #}
     {% include "_suggestion_actions.html" %}
   </div>
   {% else %}
