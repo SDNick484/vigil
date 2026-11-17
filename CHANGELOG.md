@@ -9,3 +9,4 @@ All notable changes to this project are recorded here, in the style of
 ### Added
 - Package scaffold, TOML config loading with validation, `vigil` CLI skeleton and CI.
 - systemd, OpenRC and XDG autostart service files in `contrib/`, with install, run and config documentation.
+- Tolerant, incremental transcript parser (`vigil.transcript`) with sanitized real fixtures.
