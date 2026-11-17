@@ -1,8 +1,10 @@
 """Resume an indexed session: decide how (`plan_resume`), then do it (`execute`).
 
 The command line is built only from the indexed session's ID and working folder, plus the
-allow-listed `resume.default_flags`. Nothing user-supplied reaches an argv, and nothing here runs a
-shell.
+allow-listed `resume.default_flags` and, when acting on a review's suggestion, the flags it
+suggested (allow-listed too). `plan_start_new` starts a new session, only in the folder of an
+indexed one, under an ID vigil chose. Nothing else user-supplied reaches an argv, and nothing here
+runs a shell.
 """
 
 import logging
@@ -14,7 +16,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,7 +25,7 @@ from typing import Literal
 
 from vigil.claude_cli import Capabilities, LiveSession
 from vigil.config import ResumeConfig
-from vigil.flags import FlagRefused, check
+from vigil.flags import FlagRefused, check, merge
 from vigil.index.queries import SessionRow, record_launch
 from vigil.terminal import terminal_argv
 from vigil.transcript import find_remote_url
@@ -97,13 +99,19 @@ def _which(name: str, env: Mapping[str, str]) -> str | None:
     return shutil.which(name, path=env.get("PATH", ""))
 
 
-def _checked_flags(flags: tuple[str, ...]) -> list[str]:
-    """The default flags, re-checked against `vigil.flags` (config loading checks them too) and
+def _checked_flags(flags: tuple[str, ...], extra: Sequence[str] = ()) -> list[str]:
+    """The default flags with `extra` merged in after them (`vigil.flags.merge`: a default flag
+    `extra` also has takes its value from `extra`), each re-checked against `vigil.flags` (config
+    loading checks the defaults too, the caller `extra` with the installed claude's catalog) and
     normalized to one token per flag and per value."""
     try:
-        return check(flags)
+        defaults = check(flags)
     except FlagRefused as error:
         raise ResumeRefused(f"resume.default_flags: {error.reason}") from error
+    try:
+        return merge(defaults, check(extra))
+    except FlagRefused as error:
+        raise ResumeRefused(error.reason) from error
 
 
 def joinable_link(session: SessionRow, live: dict[str, LiveSession]) -> str | None:
@@ -191,6 +199,7 @@ def plan_resume(
     live: dict[str, LiveSession],
     cfg: ResumeConfig,
     env: Mapping[str, str],
+    extra_flags: Sequence[str] = (),
 ) -> ResumePlan:
     """Decide how to resume `session`. Starts nothing (it only looks at the filesystem and PATH).
 
@@ -202,6 +211,10 @@ def plan_resume(
     terminal; without a link there is nothing for the requester to do with it, so a background
     session is refused with `restartable` set. A session vigil starts always has
     `--remote-control`. The plan has no terminal while `TERMINAL_ALLOWED` is False.
+
+    `extra_flags` (a review's suggestion) go after the default flags when the session is started
+    (a default flag they also have takes their value), and are refused unless `vigil.flags.check`
+    allows them; a live session is joined or attached to as it is, without them.
     """
     session_id = session.session_id
     if not _SESSION_ID.fullmatch(session_id):
@@ -228,7 +241,7 @@ def plan_resume(
         start = None
         attach = ["claude", "attach", session_id]
     else:
-        flags = _with_remote_control(_checked_flags(cfg.default_flags))
+        flags = _with_remote_control(_checked_flags(cfg.default_flags, extra_flags))
         method = _method(caps, cfg, env)
         if method == "bg":
             start = ["claude", "--bg", "--resume", session_id, *flags]
@@ -239,19 +252,63 @@ def plan_resume(
             start += ["claude", "--resume", session_id, *flags]
             attach = ["tmux", "attach", "-t", name]
 
-    terminal: list[str] | None = None
-    if TERMINAL_ALLOWED.get():
-        try:
-            terminal = terminal_argv(attach, cwd, cfg, env)
-        except ValueError as error:
-            raise ResumeRefused(f"resume.terminal_command is not usable: {error}") from error
     return ResumePlan(
         start=start,
         start_cwd=cwd,
         attach=attach,
-        terminal=terminal,
+        terminal=_terminal(attach, cwd, cfg, env),
         method=method,
         session_id=session_id,
+    )
+
+
+def _terminal(
+    attach: list[str], cwd: str, cfg: ResumeConfig, env: Mapping[str, str]
+) -> list[str] | None:
+    if not TERMINAL_ALLOWED.get():
+        return None
+    try:
+        return terminal_argv(attach, cwd, cfg, env)
+    except ValueError as error:
+        raise ResumeRefused(f"resume.terminal_command is not usable: {error}") from error
+
+
+def plan_start_new(
+    cwd: str | None,
+    flags: Sequence[str],
+    caps: Capabilities,
+    cfg: ResumeConfig,
+    env: Mapping[str, str],
+    new_session_id: str,
+) -> ResumePlan:
+    """Decide how to start a new session `new_session_id` in `cwd` with the default flags and
+    `flags` (merged as `plan_resume` merges its `extra_flags`). Starts nothing.
+
+    `cwd` must be the folder of an indexed session (the caller's to ensure) and still exist;
+    `new_session_id` is one vigil chose (`--session-id`). Launched like a resume: `claude --bg`,
+    else tmux, always with `--remote-control`, with a terminal only while `TERMINAL_ALLOWED`.
+    Raises ResumeRefused as `plan_resume` does.
+    """
+    if not _SESSION_ID.fullmatch(new_session_id):
+        raise ResumeRefused(f"not a valid session id: {new_session_id!r}")
+    folder = _check_cwd(cwd)
+    checked = _with_remote_control(_checked_flags(cfg.default_flags, flags))
+    method = _method(caps, cfg, env)
+    if method == "bg":
+        start = ["claude", "--bg", "--session-id", new_session_id, *checked]
+        attach = ["claude", "attach", new_session_id]
+    else:
+        name = tmux_session_name(new_session_id)
+        start = ["tmux", "new-session", "-d", "-s", name, "-c", folder]
+        start += ["claude", "--session-id", new_session_id, *checked]
+        attach = ["tmux", "attach", "-t", name]
+    return ResumePlan(
+        start=start,
+        start_cwd=folder,
+        attach=attach,
+        terminal=_terminal(attach, folder, cfg, env),
+        method=method,
+        session_id=new_session_id,
     )
 
 

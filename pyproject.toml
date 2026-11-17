@@ -22,6 +22,7 @@ dependencies = [
     "watchfiles",
     "python-multipart",
     "httpx",
+    "tomlkit",
 ]
 
 [project.optional-dependencies]

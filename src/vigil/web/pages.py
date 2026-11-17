@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from vigil.catalog import current_catalog
 from vigil.commands import resume_command
 from vigil.index.queries import (
     SessionRow,
@@ -288,6 +289,7 @@ def session_page(request: Request, session_id: str) -> Any:
         links = chain(conn, row.chain_id) if row is not None else []
         flags = vigil_launch_flags(conn, row.session_id) if row is not None else []
         reviews = list_reviews(conn, row.session_id) if row is not None else []
+        catalog = current_catalog(conn)
     if row is None:
         return _render(request, "session_detail.html", {"row": None, "ident": session_id}, 404)
     web = state(request)
@@ -303,6 +305,7 @@ def session_page(request: Request, session_id: str) -> Any:
         "at_desk": TERMINAL_ALLOWED.get(),
         "numbers": _token_numbers(row, flags),
         "reviews": reviews,
+        "catalog": catalog,
         "review_budget": web.config.review.max_budget_usd,
     }
     return _render(request, "session_detail.html", context)

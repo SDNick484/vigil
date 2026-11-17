@@ -27,9 +27,9 @@
     <p class="muted">{{ suggestion.file_target }}</p>
     <pre>{% if suggestion.file_settings is not none %}{{ suggestion.file_settings|tojson(2) }}{% else %}{{ suggestion.file_text }}{% endif %}</pre>
     {% endif %}
-    {# Per-card actions (Tasks 8-9), keyed by (review.id, index): `_suggestion_actions.html`
-       gets `review`, `suggestion` and `index`. #}
-    {% include "_suggestion_actions.html" ignore missing %}
+    {# Per-card actions, keyed by (review.id, index): `_suggestion_actions.html` gets `review`,
+       `suggestion`, `index` and `catalog`. #}
+    {% include "_suggestion_actions.html" %}
   </div>
   {% else %}
   <p class="muted">No suggestions.</p>

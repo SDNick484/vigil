@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
 
@@ -24,7 +24,7 @@ from vigil.claude_cli import (
     live_sessions,
     live_sessions_or_none,
 )
-from vigil.config import Config
+from vigil.config import Config, load_config
 from vigil.peers import PeerHub
 from vigil.review.runner import ReviewSlot
 
@@ -84,6 +84,13 @@ class WebState:
     """The configured peers (v2) and their latest sessions."""
     review_slot: ReviewSlot = field(default_factory=ReviewSlot)
     """Taken while a session review runs: one at a time (`vigil.web.review`)."""
+
+    def reload_config(self) -> None:
+        """Re-read the config file (`vigil.paths.config_path`, where `vigil serve` reads it) after
+        vigil changed it (`vigil.config_edit`), and take its `resume` section. The rest stays as
+        the service started with it: the watcher, remote access and peers were set up from it
+        then. Raises ConfigError when the file does not load."""
+        self.config = replace(self.config, resume=load_config().resume)
 
 
 def state(request: Request) -> WebState:

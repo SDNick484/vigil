@@ -281,6 +281,10 @@ pages:
   202 with `{"ok": true, "review_id": <id>}` at once; the review runs in the background. 409 with
   `{"ok": false, "reason": "a review is already running", "review_id": <id>}` while another runs,
   or with the reason when the session's folder is gone or `claude` is missing.
+- `POST /reviews/{rid}/suggestions/{i}/resume`, `/start-new` and `/always-use` act on flag
+  suggestion `i` (counted from 0) of review `rid`: [see below](#session-reviews). The flag is the
+  stored one; nothing else is sent. The first two answer like a resume; `always-use` answers
+  `{"ok": true, "default_flags": [...]}`. 409 with the reason when the flag is refused.
 - `POST /peers/{name}/sessions/{id}/resume` resumes a session of a [peer](#peers) on that peer, and
   answers like the resume above plus `"machine": "<name>"`. The peer's own 404 and 409 come back
   with its reason; 502 when the peer cannot be reached or refuses the request.
@@ -317,6 +321,22 @@ dropped. One review runs at a time; reviews are kept until their session leaves 
 
 Suggestions come from Claude reading a transcript that can hold fetched web pages and other text
 you did not write, so check them before acting on them.
+
+A flag suggestion the allow-list accepts (the one for `resume.default_flags`, and offered by the
+installed `claude`) has three buttons:
+
+- **Resume with these** resumes the session with the flag added for that launch only. A session
+  that is already running is joined or attached to as it is.
+- **Start new session with these** starts a new session in the reviewed session's folder,
+  `claude --bg --session-id <new id> --remote-control [default flags] <flag>` (tmux when there is
+  no `--bg`). At the desk it opens a terminal; from another device it waits for the Remote Control
+  link, like Resume.
+- **Always use** adds the flag to `resume.default_flags` in vigil's config file, replacing the
+  value of a flag already there. The rest of the file, comments included, is kept as written, and
+  the file is only replaced when the result is a valid config. This is the only write to vigil's
+  config from the web.
+
+Any other flag gets its command line to copy and run yourself; vigil will not launch it.
 
 ## Remote access
 

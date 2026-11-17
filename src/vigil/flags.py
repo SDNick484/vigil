@@ -158,3 +158,26 @@ def parse_suggested(name: str, value: str | None) -> list[str]:
     if value is None or value == "":
         return [name]
     return [name, value]
+
+
+def _groups(tokens: Sequence[str]) -> list[list[str]]:
+    groups: list[list[str]] = []
+    for token in tokens:
+        if token.startswith("-") or not groups:
+            groups.append([token])
+        else:
+            groups[-1].append(token)
+    return groups
+
+
+def merge(base: Sequence[str], extra: Sequence[str]) -> list[str]:
+    """`base` with `extra` merged in, both as `check` returns them: a flag `base` already has takes
+    its value (or its lack of one) from `extra` where it stands; the other flags of `extra` follow,
+    in order."""
+    added = {group[0]: group for group in _groups(extra)}
+    merged: list[str] = []
+    for group in _groups(base):
+        merged.extend(added.pop(group[0], group))
+    for group in added.values():
+        merged.extend(group)
+    return merged

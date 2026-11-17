@@ -9,6 +9,7 @@ its status from the live sessions, cached for a few seconds (`vigil.web.LiveStat
 import os
 import shlex
 import sqlite3
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
@@ -352,7 +353,7 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
                 started = _start(web, conn, row, caps, live)
             except ResumeRefused as refused:
                 return _refusal(409, refused.reason, restartable=refused.restartable)
-    return _answer(web, row, started)
+    return _answer(web, Path(row.transcript_path), started)
 
 
 class _Started(NamedTuple):
@@ -370,12 +371,19 @@ def _start(
     row: SessionRow,
     caps: Capabilities,
     live: dict[str, LiveSession],
+    extra_flags: Sequence[str] = (),
 ) -> _Started:
-    """Plan the resume of `row` against `live` and carry it out. Raises ResumeRefused."""
-    plan = plan_resume(row, caps, live, web.config.resume, os.environ)
+    """Plan the resume of `row` against `live` (with `extra_flags` if it is started) and carry it
+    out. Raises ResumeRefused."""
+    plan = plan_resume(row, caps, live, web.config.resume, os.environ, extra_flags)
     if not TERMINAL_ALLOWED.get() and plan.start is None:
         # Live with a link (plan_resume refuses it without one): start nothing.
         return _Started(plan, shlex.join(plan.attach), None, joinable_link(row, live))
+    return _launch(plan, conn)
+
+
+def _launch(plan: ResumePlan, conn: sqlite3.Connection) -> _Started:
+    """Carry out `plan`, which starts a session. Raises ResumeRefused."""
     launched_at = datetime.now(UTC)
     return _Started(plan, execute(plan, conn=conn), launched_at, None)
 
@@ -385,18 +393,19 @@ def _without(live: dict[str, LiveSession], row: SessionRow) -> dict[str, LiveSes
     return {session_id: item for session_id, item in live.items() if session_id != row.session_id}
 
 
-def _answer(web: WebState, row: SessionRow, started: _Started) -> dict[str, object]:
+def _answer(
+    web: WebState, transcript: Path | Callable[[], Path | None], started: _Started
+) -> dict[str, object]:
     """The answer to a resume once `started` happened: from another machine, wait for the link of
-    a session that was just started."""
+    a session that was just started, in its `transcript` (or the one the function finds; see
+    `wait_for_remote_url`)."""
     plan, attach, launched_at, link = started
     if launched_at is None:
         return _resumed(attach, plan, link)
     web.live.clear()
     if TERMINAL_ALLOWED.get():
         return _resumed(attach, plan, None)
-    link = wait_for_remote_url(
-        Path(row.transcript_path), launched_at, web.config.resume.remote_link_timeout
-    )
+    link = wait_for_remote_url(transcript, launched_at, web.config.resume.remote_link_timeout)
     return _resumed(attach, plan, link, pending=link is None)
 
 
@@ -450,7 +459,7 @@ def restart_remote(
             except ResumeRefused as refused:
                 reason = f"stopped, but could not start it again: {refused.reason}"
                 return _refusal(409, reason, restartable=False)
-    return _answer(web, row, started)
+    return _answer(web, Path(row.transcript_path), started)
 
 
 def _resumed(

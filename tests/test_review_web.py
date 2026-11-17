@@ -2,6 +2,7 @@ import os
 import sqlite3
 import sys
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import LOOPBACK_URL, VigilEnv, freeze_tree
+from tests.test_api import (
+    CLAUDE_BG,
+    LINK,
+    install_claude,
+    remote_client,  # noqa: F401 - a fixture, used by name
+)
 from tests.test_review_runner import ANSWER, claude_result
 from tests.test_review_store import NUMBERS, insert
 from vigil.config import load_config
@@ -304,3 +311,225 @@ def test_shutdown_stops_a_running_review(vigil_env: VigilEnv, tmp_path: Path) ->
     assert stored is not None
     assert (stored.status, stored.error) == ("failed", STOPPED)
     assert STOPPED == "vigil stopped during the review"
+
+
+# Acting on flag suggestions (Task 8). The client sends only the review id and the suggestion's
+# position; the flag always comes from the stored suggestion.
+
+PLACEHOLDER_NEW = "0123abcd-0000-4000-8000-0000000000ff"
+
+CATALOG = [
+    ("--model", "Model for the current session"),
+    ("--permission-mode", 'Permission mode (choices: "default", "plan", "bypassPermissions")'),
+    ("--dangerously-skip-permissions", "Bypass all permission checks"),
+]
+
+
+def flag_card(name: str, value: str | None) -> Suggestion:
+    return Suggestion(
+        kind="flag",
+        title="Try a flag",
+        why="why",
+        evidence="turn 2",
+        flag_name=name,
+        flag_value=value,
+        file_target=None,
+        file_text=None,
+        file_settings=None,
+    )
+
+
+def flag_review(env: VigilEnv, *cards: Suggestion) -> int:
+    """A finished review of NAMED holding `cards`, with a catalog for the installed claude."""
+    conn = connect(env.index)
+    with conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO catalog (version, kind, name, short, parent, description) "
+            "VALUES ('2.1.312', 'flag', ?, NULL, NULL, ?)",
+            CATALOG,
+        )
+    review_id = insert(conn)
+    finish(conn, review_id, suggestions=list(cards), advice=[], cost_usd=0.1)
+    conn.close()
+    return review_id
+
+
+def launched(env: VigilEnv) -> list[tuple[list[str], str]]:
+    return [(c.argv, c.cwd) for c in env.bin.calls("claude") if "--bg" in c.argv]
+
+
+def test_suggestion_resume_uses_stored_flag(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
+    review_id = flag_review(
+        vigil_env, flag_card("--permission-mode", "plan"), flag_card("--model", "opus")
+    )
+
+    response = web_client.post(f"/reviews/{review_id}/suggestions/1/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED}",
+        "opened_terminal": False,
+        "remote_url": None,
+        "pending": False,
+    }
+    assert launched(vigil_env) == [
+        (["--bg", "--resume", NAMED, "--remote-control", "--model", "opus"], str(folder))
+    ]
+    # Unknown review or position: 404, nothing launched.
+    assert web_client.post(f"/reviews/{review_id}/suggestions/2/resume").status_code == 404
+    assert web_client.post(f"/reviews/{review_id + 1}/suggestions/0/resume").status_code == 404
+    assert len(launched(vigil_env)) == 1
+
+
+def test_suggestion_refused_flag_409(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "vigil" / "config.toml"
+    before = config.read_text()
+    review_id = flag_review(vigil_env, flag_card("--dangerously-skip-permissions", None))
+
+    for action in ("resume", "start-new", "always-use"):
+        response = web_client.post(f"/reviews/{review_id}/suggestions/0/{action}")
+        assert response.status_code == 409, action
+        assert response.json() == {
+            "ok": False,
+            "reason": "flag not allowed: --dangerously-skip-permissions",
+        }
+    assert launched(vigil_env) == []
+    assert config.read_text() == before
+
+    # The card offers no launch, only the command to copy.
+    text = web_client.get(f"/sessions/{NAMED}/reviews/{review_id}").text
+    assert "vigil will not launch this flag itself. Copy the command to try it:" in text
+    assert "<code>claude --dangerously-skip-permissions</code>" in text
+    assert "/suggestions/0/resume" not in text
+
+
+def test_suggestion_card_buttons(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    review_id = flag_review(
+        vigil_env, flag_card("--model", "opus"), flag_card("--permission-mode", "bypassPermissions")
+    )
+    for url in (f"/sessions/{NAMED}/reviews/{review_id}", f"/sessions/{NAMED}"):
+        text = web_client.get(url).text
+        for action in ("resume", "start-new", "always-use"):
+            assert f'hx-post="/reviews/{review_id}/suggestions/0/{action}"' in text
+            assert f"/reviews/{review_id}/suggestions/1/{action}" not in text
+        assert "Resume with these" in text
+        assert "Start new session with these" in text
+        assert "Always use" in text
+        assert "<code>claude --permission-mode bypassPermissions</code>" in text
+
+
+def test_start_new_at_the_desk(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
+    monkeypatch.setattr("vigil.web.review.uuid.uuid4", lambda: uuid.UUID(PLACEHOLDER_NEW))
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+    response = web_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
+    assert response.status_code == 200, response.text
+    assert response.json()["attach"] == f"claude attach {PLACEHOLDER_NEW}"
+    assert launched(vigil_env) == [
+        (
+            ["--bg", "--session-id", PLACEHOLDER_NEW, "--remote-control", "--model", "opus"],
+            str(folder),
+        )
+    ]
+
+
+def test_start_new_remote_waits_for_link(
+    vigil_env: VigilEnv,
+    remote_client: TestClient,  # noqa: F811 - the fixture imported above
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    monkeypatch.setattr("vigil.web.review.uuid.uuid4", lambda: uuid.UUID(PLACEHOLDER_NEW))
+    # Claude Code makes the new session's transcript in its project folder; vigil finds it there.
+    project = vigil_env.claude_home / "projects" / "-placeholder-work"
+    project.mkdir()
+    install_claude(vigil_env, transcript=project / f"{PLACEHOLDER_NEW}.jsonl", link=LINK)
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+
+    response = remote_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {PLACEHOLDER_NEW}",
+        "opened_terminal": False,
+        "remote_url": LINK,
+        "pending": False,
+    }
+    assert launched(vigil_env) == [
+        (
+            ["--bg", "--session-id", PLACEHOLDER_NEW, "--remote-control", "--model", "opus"],
+            str(folder),
+        )
+    ]
+
+
+def test_start_new_remote_pending_without_a_link(
+    vigil_env: VigilEnv,
+    remote_client: TestClient,  # noqa: F811 - the fixture imported above
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    install_claude(vigil_env, transcript=tmp_path / "unused.jsonl", link=None)
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+    response = remote_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
+    assert response.status_code == 200, response.text
+    assert (response.json()["remote_url"], response.json()["pending"]) == (None, True)
+
+
+def test_always_use_reloads_config(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "vigil" / "config.toml"
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+
+    response = web_client.post(f"/reviews/{review_id}/suggestions/0/always-use")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "default_flags": ["--model", "opus"]}
+    assert f'claude_home = "{vigil_env.claude_home}"' in config.read_text()
+    assert web_state(web_client).config.resume.default_flags == ("--model", "opus")
+    assert launched(vigil_env) == []
+    # The next plain resume uses it.
+    assert web_client.post(f"/sessions/{NAMED}/resume").status_code == 200
+    assert launched(vigil_env) == [
+        (["--bg", "--resume", NAMED, "--remote-control", "--model", "opus"], str(folder))
+    ]
+
+
+def test_acting_on_suggestions_never_writes_under_the_claude_home(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+    freeze_tree(vigil_env.claude_home)
+    for action in ("resume", "start-new", "always-use"):
+        response = web_client.post(f"/reviews/{review_id}/suggestions/0/{action}")
+        assert response.status_code == 200, (action, response.text)

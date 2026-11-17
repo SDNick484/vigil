@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from vigil.claude_cli import Capabilities, LiveSession
 from vigil.config import ResumeConfig
 from vigil.index.db import connect
 from vigil.index.queries import SessionRow
-from vigil.remote import wait_for_remote_url
+from vigil.remote import find_transcript, wait_for_remote_url
 from vigil.resume import (
     TERMINAL_ALLOWED,
     ResumePlan,
@@ -24,6 +25,7 @@ from vigil.resume import (
     execute,
     joinable_link,
     plan_resume,
+    plan_start_new,
     stop_session,
 )
 
@@ -573,3 +575,103 @@ def test_stop_session_treats_an_unknown_live_state_as_still_live(fake_bin: FakeB
     assert clock.now == 0.5 and answers == [None]
     with pytest.raises(ResumeRefused, match="could not stop the session"):
         stop_session(SID, probe, timeout=1.0, clock=clock, sleep=clock.sleep)
+
+
+def test_extra_flags_appended_and_checked(workdir: Path, env: dict[str, str]) -> None:
+    cfg = ResumeConfig(default_flags=("--model", "sonnet", "--verbose"))
+    plan = plan_resume(
+        make_session(str(workdir)), ALL_CAPS, {}, cfg, env, extra_flags=["--model=opus"]
+    )
+    # The suggested value replaces the default one; the rest of the defaults stay.
+    assert plan.start == [
+        *("claude", "--bg", "--resume", SID, "--remote-control"),
+        *("--model", "opus", "--verbose"),
+    ]
+    # A flag the defaults lack is added after them.
+    extra = ["--permission-mode", "plan"]
+    plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, cfg, env, extra_flags=extra)
+    assert plan.start is not None
+    assert plan.start[5:] == ["--model", "sonnet", "--verbose", "--permission-mode", "plan"]
+    for bad in (["--dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"]):
+        with pytest.raises(ResumeRefused, match="not allowed"):
+            plan_resume(make_session(str(workdir)), ALL_CAPS, {}, cfg, env, extra_flags=bad)
+
+
+NEW_ID = "0123abcd-0000-4000-8000-0000000000ff"
+
+
+def test_start_new_bg_argv(workdir: Path, env: dict[str, str]) -> None:
+    cfg = ResumeConfig(default_flags=("--verbose",))
+    plan = plan_start_new(str(workdir), ["--model", "opus"], ALL_CAPS, cfg, env, NEW_ID)
+    assert plan.method == "bg"
+    assert plan.start == [
+        "claude",
+        "--bg",
+        "--session-id",
+        NEW_ID,
+        "--remote-control",
+        "--verbose",
+        "--model",
+        "opus",
+    ]
+    assert plan.start_cwd == str(workdir)
+    assert plan.attach == ["claude", "attach", NEW_ID]
+    assert plan.terminal is None  # headless
+    assert plan.session_id == NEW_ID
+
+
+def test_start_new_tmux_argv(workdir: Path, fake_bin: FakeBin, env: dict[str, str]) -> None:
+    fake_bin.install("tmux")
+    plan = plan_start_new(str(workdir), ["--model", "opus"], OLD_CAPS, RC, env, NEW_ID)
+    assert plan.method == "tmux"
+    assert plan.start == [
+        "tmux",
+        "new-session",
+        "-d",
+        "-s",
+        "vigil-0123abcd",
+        "-c",
+        str(workdir),
+        "claude",
+        "--session-id",
+        NEW_ID,
+        "--remote-control",
+        "--model",
+        "opus",
+    ]
+    assert plan.attach == ["tmux", "attach", "-t", "vigil-0123abcd"]
+
+
+def test_start_new_refuses_missing_cwd(
+    tmp_path: Path, fake_bin: FakeBin, env: dict[str, str]
+) -> None:
+    gone = tmp_path / "deleted-project"
+    with pytest.raises(ResumeRefused) as refused:
+        plan_start_new(str(gone), [], ALL_CAPS, RC, env, NEW_ID)
+    assert refused.value.reason == f"folder no longer exists: {gone}"
+    with pytest.raises(ResumeRefused, match="no working folder"):
+        plan_start_new(None, [], ALL_CAPS, RC, env, NEW_ID)
+    with pytest.raises(ResumeRefused, match="not a valid session id"):
+        plan_start_new(str(tmp_path), [], ALL_CAPS, RC, env, "--resume")
+    with pytest.raises(ResumeRefused, match="not allowed"):
+        plan_start_new(str(tmp_path), ["--settings", "x"], ALL_CAPS, RC, env, NEW_ID)
+    assert fake_bin.calls("claude") == []
+
+
+def test_wait_for_remote_url_finds_a_new_sessions_transcript(tmp_path: Path) -> None:
+    home = tmp_path / "claude_home"
+    project = home / "projects" / "-placeholder-work"
+    project.mkdir(parents=True)
+    assert find_transcript(home, NEW_ID) is None
+
+    def create(sleeps: int) -> None:
+        if sleeps == 2:  # Claude Code makes the transcript a moment after starting
+            (project / f"{NEW_ID}.jsonl").write_text(
+                bridge_line(LINK, LAUNCH + timedelta(seconds=1))
+            )
+
+    time_ = FakeTime(create)
+    look = partial(find_transcript, home, NEW_ID)
+    assert wait_for_remote_url(look, LAUNCH, 30.0, clock=time_.clock, sleep=time_.sleep) == LINK
+    assert time_.sleeps == [0.5, 0.5]
+    assert find_transcript(home, NEW_ID) == project / f"{NEW_ID}.jsonl"

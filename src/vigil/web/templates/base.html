@@ -48,8 +48,11 @@
         window.location.href = link;
       } else if (data.ok === true && data.pending === true) {
         var page = document.createElement("a");
-        page.href = new URL(xhr.responseURL).pathname.replace(/\/(resume|restart-remote)$/, "");
-        page.textContent = "the session page";
+        var path = new URL(xhr.responseURL).pathname;
+        // A review suggestion's resume or new session: its page may not exist yet, so the list.
+        var ofSession = /\/sessions\/[^/]+\/(resume|restart-remote)$/.test(path);
+        page.href = ofSession ? path.replace(/\/(resume|restart-remote)$/, "") : "/";
+        page.textContent = ofSession ? "the session page" : "the sessions list";
         target.className = "result ok";
         target.append("Started; the Remote Control link is not available yet. Try ", page, " in a moment.");
       } else if (data.ok === true && data.attach) {
@@ -68,6 +71,12 @@
           var fragment = new URL(xhr.responseURL).pathname.replace(/\/review$/, "/reviews/" + data.review_id);
           htmx.ajax("GET", fragment, {target: "#reviews", swap: "afterbegin"});
         }
+      } else if (data.ok === true && Array.isArray(data.default_flags)) {
+        // "Always use" on a flag suggestion: what resume.default_flags now holds.
+        var flags = document.createElement("code");
+        flags.textContent = data.default_flags.join(" ");
+        target.className = "result ok";
+        target.append("Saved; every launch now gets ", flags);
       } else if (data.id) {
         target.className = "result ok";
         target.append("Saved");
@@ -94,6 +103,29 @@
       var scope = button.closest("li.session, section");
       var step = scope ? scope.querySelector(".restart-confirm") : null;
       if (step) step.hidden = button.classList.contains("cancel");
+    });
+  </script>
+  <script>
+    // Copy buttons (button.copy): the clipboard needs a secure context, so over plain http from
+    // another machine the command next to the button is selected for copying by hand instead.
+    document.addEventListener("click", function (event) {
+      var button = event.target instanceof Element ? event.target.closest("button.copy") : null;
+      if (!button) return;
+      var code = button.parentElement ? button.parentElement.querySelector("code") : null;
+      function select() {
+        if (!code) return;
+        var range = document.createRange();
+        range.selectNodeContents(code);
+        var selection = window.getSelection();
+        if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+      }
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(button.dataset.copy || "").then(function () {
+          button.textContent = "Copied";
+        }, select);
+      } else {
+        select();
+      }
     });
   </script>
   <script>
