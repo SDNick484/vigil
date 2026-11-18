@@ -8,8 +8,7 @@ adds history, resume across projects and usage.
 ## Install
 
 Setting vigil up takes about five minutes. You install it, check that it can read your sessions,
-try the web UI, then choose how to keep it running. Every step below runs as your own user, with
-no `sudo`.
+then let `vigil setup` keep it running. Every step below runs as your own user, with no `sudo`.
 
 ### What you need
 
@@ -62,19 +61,51 @@ there:
 0 errors.` and `vigil ls` lists your most recent sessions with their project, branch and short id.
 The first scan of a large history can take a few seconds; after that, only new lines are read.
 
-### Step 3: try the web UI
+### Step 3: `vigil setup`
+
+    vigil setup
+
+This is the recommended way to keep vigil running. It looks at your machine and recommends one
+method: XDG autostart when it finds a desktop session, otherwise a systemd user unit, otherwise an
+OpenRC user service (OpenRC 0.60 or newer). It then shows what it will write and where, and asks
+before it does anything. Say yes and it writes the file with the full path to `vigil` (and, for the
+services, a `PATH` that includes the folder `claude` is in), starts vigil, and prints the address
+once vigil answers, usually <http://127.0.0.1:7787/>.
+
+- `vigil setup --dry-run` only prints what it would do. `--yes` skips the question.
+  `--method autostart|systemd|openrc` picks the method yourself. `--no-start` installs without
+  starting vigil now.
+- If a different file is already there, setup shows the difference and asks before replacing it,
+  even with `--yes`. The one exception is a file setup wrote itself (it carries a line saying so),
+  which `--yes` replaces after showing the difference.
+- `vigil setup --remove` stops vigil and removes what setup installed, and only that: a file
+  without setup's line, such as one you copied from `contrib/`, is left alone.
+- setup refuses to run as root, never uses `sudo`, writes only under `~/.config/autostart`,
+  `~/.config/systemd/user` and `~/.config/rc`, and never edits your shell files. If `~/.local/bin`
+  is not on your `PATH`, it tells you which line to add and where.
+
+If you would rather do it by hand, or setup finds no method it can use, follow [Run](#run) below.
+If anything does not work, `vigil doctor` explains what is wrong (see
+[Troubleshooting](#troubleshooting)).
+
+### Step 4: try the web UI
+
+If you ran `vigil setup`, vigil is already running: open <http://127.0.0.1:7787>. Otherwise start
+it for now with:
 
     vigil serve
 
-Open <http://127.0.0.1:7787> in a browser. You should see your sessions grouped by project, with a
-search box and a **Resume** button on each row. Press `Ctrl-C` in the terminal to stop it. vigil
-only listens on `127.0.0.1`, so other machines can't reach it (see [Remote access](#remote-access)
-if you want them to).
+You should see your sessions grouped by project, with a search box and a **Resume** button on
+each row. Press `Ctrl-C` in the terminal to stop `vigil serve`. vigil only listens on
+`127.0.0.1`, so other machines can't reach it (see [Remote access](#remote-access) if you want
+them to).
 
 ## Run
 
-To have vigil running all the time, start it with your desktop or as a user service. All three
-options below run `vigil serve` as you, from `~/.local/bin/vigil`.
+`vigil setup` ([Step 3](#step-3-vigil-setup)) does everything in this section for you. To do it by
+hand instead, start vigil with your desktop or as a user service. All three options below run
+`vigil serve` as you, from `~/.local/bin/vigil`. The files are in `contrib/`; the copies `vigil
+setup` fills in are in the package, and a test keeps the two identical.
 
 | You use | Choose | Resume opens a terminal window? |
 | --- | --- | --- |
@@ -149,8 +180,9 @@ version also needs `tomlkit`, which the commands above install along with it.
 
 ## Uninstall
 
-1. Stop vigil (see **To restart** under [Upgrade](#upgrade)) and remove the autostart entry or
-   service file you installed.
+1. Run `vigil setup --remove`. It stops vigil and removes the autostart entry or service file that
+   `vigil setup` installed. If you installed one by hand, stop vigil (see **To restart** under
+   [Upgrade](#upgrade)) and remove that file yourself.
 2. Remove the program:
    - **pipx:** `pipx uninstall vigil-sessions`
    - **Virtual environment:** `rm -r ~/.local/share/vigil-venv ~/.local/bin/vigil`
@@ -159,6 +191,14 @@ version also needs `tomlkit`, which the commands above install along with it.
 Your Claude Code sessions in `~/.claude` are untouched: vigil never writes there.
 
 ## Troubleshooting
+
+Start with `vigil doctor`. It checks, without changing anything, your Python version, where
+`vigil` and `claude` are and whether their folders are on `PATH`, that vigil can read the Claude
+home and write its index, that the config loads, whether a display and a terminal for Resume are
+available, whether the port is free or already answered by vigil, and whether an autostart entry
+or user service is installed and points at a file that exists. It prints one line per check
+(`ok`, `warning` or `PROBLEM`), says how to fix each problem, and exits 1 if there is one;
+`vigil doctor --json` prints the same as data. The list below covers the same ground by hand.
 
 - **`vigil: command not found`.** `~/.local/bin` isn't on your `PATH`; see
   [Step 2](#step-2-check-that-it-works).

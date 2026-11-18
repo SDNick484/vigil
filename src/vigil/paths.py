@@ -12,9 +12,14 @@ def _xdg_dir(env_var: str, default: str) -> Path:
     return Path.home() / default
 
 
+def config_home() -> Path:
+    """The user's config folder: ``$XDG_CONFIG_HOME``, else ``~/.config``."""
+    return _xdg_dir("XDG_CONFIG_HOME", ".config")
+
+
 def config_path() -> Path:
     """The config file: ``$XDG_CONFIG_HOME/vigil/config.toml``."""
-    return _xdg_dir("XDG_CONFIG_HOME", ".config") / "vigil" / "config.toml"
+    return config_home() / "vigil" / "config.toml"
 
 
 def data_dir() -> Path:

@@ -27,6 +27,8 @@ COMMANDS.append(import_module("vigil.commands.resume").COMMAND)
 COMMANDS.append(import_module("vigil.commands.serve").COMMAND)
 COMMANDS.append(import_module("vigil.commands.usage").COMMAND)
 COMMANDS.append(import_module("vigil.commands.review").COMMAND)
+COMMANDS.append(import_module("vigil.commands.setup").COMMAND)
+COMMANDS.append(import_module("vigil.commands.doctor").COMMAND)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     if command is None:
         parser.print_help(sys.stderr)
         return 2
+    if getattr(command, "loads_own_config", False):
+        # `vigil doctor` loads the config itself, so that a broken one is a problem line in its
+        # report rather than the end of the run. It is handed the defaults and ignores them.
+        return command.run(args, Config())
     try:
         config = load_config()
     except ConfigError as error:
