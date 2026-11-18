@@ -80,8 +80,8 @@ The Claude home rule and the 500-character limit on indexed transcript text stay
 
 ## Part 1: the sessions page
 
-Mockup the author approved: https://claude.ai/artifact/1xtxFh8mYe9D4FwMbDsYxL (private to the
-author; the description here is complete without it).
+The author approved a mockup (private to the author); the description here is complete without
+it.
 
 - **Summary line** at the top: counts of running, background and idle sessions, and the number
   of projects. Counts follow the current search and filters.
