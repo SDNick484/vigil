@@ -481,6 +481,12 @@ def test_detail_shows_token_panel(vigil_env: VigilEnv, web_client: TestClient) -
     assert '<span class="tabular-nums">180</span>' in page  # total output tokens
     assert "64%" in page  # cache hits: 4500 of 7018 input-side tokens
     assert "Bash" in page and "40,000" in page  # the largest tool output
+    # The rest of what a review is given: models, wall-clock span, launch flags, per-turn series.
+    panel = page.split("<h2>Where the tokens went</h2>")[1].split("</section>")[0]
+    assert "claude-sonnet-5-5" in panel and "claude-opus-5-5" in panel
+    assert "<dt>Wall-clock span</dt><dd>0 min</dd>" in panel
+    assert "<dt>Launch flags</dt>" in panel and "none recorded" in panel
+    assert '<table class="turns">' in panel and "<th>Cache read</th>" in panel
 
     # No panel when the transcript cannot be read, or for a session without usage.
     sql(vigil_env, "UPDATE sessions SET transcript_path = '/nonexistent.jsonl' WHERE 1")
