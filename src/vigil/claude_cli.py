@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 _CAPS_TIMEOUT = 10.0
@@ -34,6 +35,11 @@ class LiveSession:
     kind: Literal["background", "interactive"]
     name: str | None
     cwd: str | None
+    busy: bool = False
+    """The session is working on something now (`status` is `busy`; the other value seen is
+    `idle`)."""
+    started_at: datetime | None = None
+    """When this run of the session started (`startedAt`, epoch milliseconds)."""
 
 
 _NONE = Capabilities(version=None, has_bg=False, has_attach=False, has_agents_json=False)
@@ -99,6 +105,15 @@ def capabilities(claude: str = "claude") -> Capabilities:
     return caps
 
 
+def _started_at(value: Any) -> datetime | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    except OverflowError, OSError, ValueError:
+        return None
+
+
 def _parse_entry(entry: Any) -> LiveSession | None:
     if not isinstance(entry, dict):
         return None
@@ -116,20 +131,28 @@ def _parse_entry(entry: Any) -> LiveSession | None:
         kind=kind,
         name=name if isinstance(name, str) and name else None,
         cwd=cwd if isinstance(cwd, str) and cwd else None,
+        busy=entry.get("status") == "busy",
+        started_at=_started_at(entry.get("startedAt")),
     )
+
+
+def _parse_live(text: str) -> dict[str, LiveSession] | None:
+    """The sessions in `claude agents --json` output (skipping bad entries), or None when the
+    output is not a list at all."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, list):
+        return None
+    sessions = (_parse_entry(entry) for entry in data)
+    return {s.session_id: s for s in sessions if s is not None}
 
 
 def parse_live_sessions(text: str) -> dict[str, LiveSession]:
     """Parse `claude agents --json` output. Anything unexpected yields an empty dict or skips
     the bad entry."""
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return {}
-    if not isinstance(data, list):
-        return {}
-    sessions = (_parse_entry(entry) for entry in data)
-    return {s.session_id: s for s in sessions if s is not None}
+    return _parse_live(text) or {}
 
 
 def live_sessions(caps: Capabilities, claude: str = "claude") -> dict[str, LiveSession]:
@@ -139,3 +162,15 @@ def live_sessions(caps: Capabilities, claude: str = "claude") -> dict[str, LiveS
         return {}
     out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
     return parse_live_sessions(out) if out is not None else {}
+
+
+def live_sessions_or_none(
+    caps: Capabilities, claude: str = "claude"
+) -> dict[str, LiveSession] | None:
+    """As `live_sessions`, but None, not an empty dict, when the sessions could not be listed
+    (`claude agents --json` unavailable, failing, slow or printing something unparseable), so a
+    caller that must know a session has gone is not told so by a failed look."""
+    if not caps.has_agents_json:
+        return None
+    out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
+    return _parse_live(out) if out is not None else None

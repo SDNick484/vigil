@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from vigil.transcript import TRUNCATE, FeatureKind, parse_transcript
+from vigil.transcript import TRUNCATE, FeatureKind, find_remote_url, parse_transcript
 
 FIXTURES = Path(__file__).parent / "fixtures" / "transcripts"
 REAL = FIXTURES / "2.1.312"
 HANDMADE = FIXTURES / "handmade" / "11111111-1111-4111-8111-111111111111.jsonl"
+REMOTE = FIXTURES / "handmade" / "remote-control.jsonl"
 
 PLAIN = REAL / "7fb815ab-28b5-4123-85d0-64e6fd3b4141.jsonl"  # -p, then -p --resume (same file)
 NAMED = REAL / "e47d2def-0bb3-4d50-9f9c-8e38e4cdcfba.jsonl"  # -n fixture-named
@@ -270,3 +271,24 @@ def test_command_first_prompt_replaced_across_incremental_parses(tmp_path: Path)
     second = parse_transcript(path, first.end_offset, first.facts)
     assert second.facts == parse_transcript(path).facts
     assert second.facts.first_prompt == "Please work the issue queue"
+
+
+def test_bridge_status_newest_valid_url() -> None:
+    facts = parse_transcript(REMOTE).facts
+    assert facts.remote_url == "https://claude.ai/code/session_PLACEHOLDER02"
+    assert facts.remote_url_at == datetime(2026, 11, 17, 11, 5, tzinfo=UTC)
+    # System records are not messages and change nothing else.
+    assert facts.message_count == 2
+    assert facts.last_user == "first prompt before remote control"
+
+
+def test_bridge_status_ignored_when_url_is_not_a_claude_link() -> None:
+    facts = parse_transcript(PLAIN).facts
+    assert facts.remote_url is None and facts.remote_url_at is None
+
+
+def test_find_remote_url_after() -> None:
+    between = datetime(2026, 11, 17, 11, 2, tzinfo=UTC)
+    assert find_remote_url(REMOTE, between) == "https://claude.ai/code/session_PLACEHOLDER02"
+    assert find_remote_url(REMOTE, datetime(2026, 11, 17, 11, 5, tzinfo=UTC)) is None
+    assert find_remote_url(REMOTE, datetime(2026, 11, 18, tzinfo=UTC)) is None

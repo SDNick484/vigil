@@ -26,6 +26,9 @@ class ResumeConfig:
     default_flags: tuple[str, ...] = ()
     terminal_command: str | None = None
     launcher: Launcher = "auto"
+    remote_link_timeout: float = 30.0
+    """Seconds to wait for a Remote Control link after starting a session for a remote request
+    (1 to 300)."""
 
 
 @dataclass(frozen=True)
@@ -106,7 +109,9 @@ def _validate_flags(flags: tuple[str, ...]) -> None:
 
 def _parse_resume(raw: dict[str, Any]) -> ResumeConfig:
     table = _table(raw, "resume")
-    _check_keys(table, {"default_flags", "terminal_command", "launcher"}, "resume")
+    _check_keys(
+        table, {"default_flags", "terminal_command", "launcher", "remote_link_timeout"}, "resume"
+    )
     defaults = ResumeConfig()
     flags = defaults.default_flags
     if "default_flags" in table:
@@ -125,7 +130,18 @@ def _parse_resume(raw: dict[str, Any]) -> ResumeConfig:
         if value not in get_args(Launcher):
             raise ConfigError(f"`resume.launcher` must be one of {', '.join(get_args(Launcher))}")
         launcher = value
-    return ResumeConfig(default_flags=flags, terminal_command=command, launcher=launcher)
+    timeout = defaults.remote_link_timeout
+    if "remote_link_timeout" in table:
+        value = table["remote_link_timeout"]
+        if isinstance(value, bool) or not isinstance(value, int | float) or not 1 <= value <= 300:
+            raise ConfigError("`resume.remote_link_timeout` must be a number from 1 to 300")
+        timeout = float(value)
+    return ResumeConfig(
+        default_flags=flags,
+        terminal_command=command,
+        launcher=launcher,
+        remote_link_timeout=timeout,
+    )
 
 
 def _parse_usage(raw: dict[str, Any]) -> UsageConfig:

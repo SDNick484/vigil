@@ -385,3 +385,85 @@ def test_summary_line(web_client: TestClient) -> None:
     assert f"<strong>{total - 3}</strong> idle" in page
     assert "across 2 projects" in page
     assert "Quiet" in page  # broken-repo
+
+
+LINK = "https://claude.ai/code/session_PLACEHOLDER01"
+
+
+def test_open_link_on_live_row_and_detail_page(vigil_env: VigilEnv, web_client: TestClient) -> None:
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, "2026-11-17T11:05:00.000000+00:00", NAMED)  # fmt: skip
+    sql(vigil_env, "UPDATE sessions SET remote_url = ?, remote_url_at = ? WHERE session_id = ?",
+        LINK, "2026-11-17T11:05:00.000000+00:00", FORKED)  # fmt: skip
+    # Idle: a link from an earlier run is not offered.
+    page = web_client.get("/").text
+    assert LINK not in page
+    assert LINK not in web_client.get(f"/sessions/{NAMED}").text
+
+    make_live(web_client, {NAMED: "background"})
+    page = web_client.get("/").text
+    # At the desk (a loopback request) it is "Open in Claude", a plain link, beside Resume.
+    assert f'<a class="open" href="{LINK}" rel="noopener">Open in Claude</a>' in row_html(
+        page, f"row-{NAMED}"
+    )
+    assert "Resume</button>" in row_html(page, f"row-{NAMED}")
+    detail = web_client.get(f"/sessions/{NAMED}").text
+    assert f'<a class="open" href="{LINK}" rel="noopener">Open in Claude</a>' in detail
+    # Only the live session with a link gets one (FORKED has a link but is idle).
+    assert page.count(LINK) == 1
+
+
+def test_resume_answer_handler_follows_link_and_offers_restart(web_client: TestClient) -> None:
+    page = web_client.get("/").text
+    for text in (
+        "data.remote_url",
+        "window.location.href = link",
+        "data.pending",
+        "the Remote Control link is not available yet",
+        "data.restartable",
+        "Restart with Remote Control",
+        "restart-confirm",
+        "button.restart",
+    ):
+        assert text in page, text
+
+
+CONFIRM_COPY = "Restarting stops this session and interrupts anything it is doing."
+BUSY_COPY = "This session is working right now. Restarting stops it mid-task."
+
+
+def make_busy(client: TestClient, session_id: str, *, busy: bool) -> None:
+    live = {session_id: LiveSession(session_id, "background", None, None, busy=busy)}
+    client.app.state.vigil.live.get = lambda **_: (CAPS, live)  # type: ignore[attr-defined]
+
+
+def test_restart_confirm_step_on_background_row_and_detail(web_client: TestClient) -> None:
+    # Nothing to restart on an idle session.
+    assert "restart-remote" not in row_html(web_client.get("/").text, f"row-{NAMED}")
+    assert "/restart-remote" not in web_client.get(f"/sessions/{NAMED}").text.split("<script>")[0]
+
+    make_busy(web_client, NAMED, busy=False)
+    page = web_client.get("/").text
+    row = row_html(page, f"row-{NAMED}")
+    assert f'action="/sessions/{NAMED}/restart-remote"' in row
+    assert 'name="confirm" value="yes"' in row
+    assert CONFIRM_COPY in row and BUSY_COPY not in row
+    assert ">Restart</button>" in row and ">Cancel</button>" in row
+    assert 'class="restart-confirm" hidden' in row  # opened by the answer's restart button
+    detail = web_client.get(f"/sessions/{NAMED}").text
+    assert f'action="/sessions/{NAMED}/restart-remote"' in detail
+    assert CONFIRM_COPY in detail and BUSY_COPY not in detail
+
+    # A working session gets the plain warning.
+    make_busy(web_client, NAMED, busy=True)
+    assert BUSY_COPY in row_html(web_client.get("/").text, f"row-{NAMED}")
+    assert BUSY_COPY in web_client.get(f"/sessions/{NAMED}").text
+    # Only that session's: another background row beside it has none.
+    live = {
+        NAMED: LiveSession(NAMED, "background", None, None, busy=True),
+        FORKED: LiveSession(FORKED, "background", None, None, busy=False),
+    }
+    web_client.app.state.vigil.live.get = lambda **_: (CAPS, live)  # type: ignore[attr-defined]
+    page = web_client.get("/").text
+    assert BUSY_COPY in row_html(page, f"row-{NAMED}")
+    assert BUSY_COPY not in row_html(page, f"row-{FORKED}")

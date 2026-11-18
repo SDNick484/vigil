@@ -17,7 +17,13 @@ from typing import cast
 
 from fastapi import Request
 
-from vigil.claude_cli import Capabilities, LiveSession, capabilities, live_sessions
+from vigil.claude_cli import (
+    Capabilities,
+    LiveSession,
+    capabilities,
+    live_sessions,
+    live_sessions_or_none,
+)
 from vigil.config import Config
 from vigil.peers import PeerHub
 
@@ -45,6 +51,16 @@ class LiveStatus:
                 self._value = (caps, live_sessions(caps))
                 self._at = now
             return self._value
+
+    def probe(self) -> dict[str, LiveSession] | None:
+        """The live sessions, probed now; None when they could not be listed (the cached value is
+        then dropped, not replaced by an empty one)."""
+        with self._lock:
+            caps = capabilities()
+            live = live_sessions_or_none(caps)
+            self._value = (caps, live) if live is not None else None
+            self._at = self._clock()
+            return live
 
     def clear(self) -> None:
         """Forget the cached value, so the next `get` probes again."""

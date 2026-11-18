@@ -181,9 +181,10 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | --- | --- | --- |
 | `claude_home` | `"~/.claude"` | Claude Code's data folder. vigil only reads it and never writes there. |
 | `port` | `7787` | Port for `vigil serve`, 1 to 65535. |
-| `resume.default_flags` | `[]` | Flags added to every resume. Only `--remote-control`, `--model`, `--effort`, `--permission-mode` and `--name` are allowed, each optionally followed by its value, e.g. `["--model", "opus"]`. |
+| `resume.default_flags` | `[]` | Flags added to every resume (vigil always adds `--remote-control` itself). Only `--remote-control`, `--model`, `--effort`, `--permission-mode` and `--name` are allowed, each optionally followed by its value, e.g. `["--model", "opus"]`. |
 | `resume.terminal_command` | unset | Command template that opens a terminal. Must contain `{attach}`, e.g. `"mate-terminal -- {attach}"`. Unset means `$TERMINAL`, then a list of known terminals. |
 | `resume.launcher` | `"auto"` | `"auto"` uses `claude --bg` when the installed `claude` supports it and falls back to tmux; `"bg"` and `"tmux"` force one. |
+| `resume.remote_link_timeout` | `30` | Seconds, 1 to 300, to wait for a session's Remote Control link after Resume starts it for a request from another device. |
 | `usage.shell_history` | `false` | Read your shell history to see how you launch `claude`. Off unless you turn it on. |
 | `usage.history_files` | `[]` | History files to read. Empty means the default bash, zsh and fish locations. A leading `~` is expanded. |
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |
@@ -260,6 +261,7 @@ Each session has the same fields as `vigil ls --json` (and `vigil show --json` f
 | `previous_id`, `chain_id` | The session this one continued, if known; the id shared by a resume chain. |
 | `project_key`, `project_label` | The project: git remote URL, else the folder. |
 | `transcript_path` | The transcript file. |
+| `remote_url`, `remote_url_at` | The session's Claude Remote Control link (null if none) and when it was written. |
 | `status` | `running` (open in a terminal), `background`, `idle`, or `unknown` when the installed `claude` cannot list live sessions. Refreshed at most every 5 seconds. |
 
 Two actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own

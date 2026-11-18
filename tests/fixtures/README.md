@@ -93,3 +93,9 @@ fixtures) to test tolerance. In order, its lines are: a user prompt containing t
 bytes `\xff\xfe`; a line that is not valid JSON; a JSON array; a record of an unknown type; an
 assistant reply with a Bash tool use; a user record whose `content` is a number; and a final user
 record cut off mid-line with no trailing newline (Claude Code mid-write).
+
+`remote-control.jsonl` (session `22222222-2222-4222-8222-222222222222`) is also hand-written: a
+user prompt, an assistant reply, two `bridge_status` system records with placeholder Remote Control
+links (`session_PLACEHOLDER01`, older, and `02`, newer) and one whose `url` is not a claude.ai link.
+The shared helpers in `tests/conftest.py` leave it out of the fixture tree; the tests that use it
+copy it themselves.

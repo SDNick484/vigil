@@ -28,6 +28,7 @@ from vigil.peers import (
     newest_first,
     with_machine,
 )
+from vigil.resume import TERMINAL_ALLOWED
 from vigil.serialize import apply_status, display_name
 from vigil.usage import build_report, refresh_sources
 from vigil.web import connection, state
@@ -67,10 +68,36 @@ def session_url(row: SessionRow, session_id: str | None = None) -> str:
     return f"/peers/{quote(peer, safe='')}/sessions/{ident}" if peer else f"/sessions/{ident}"
 
 
+def row_key(row: SessionRow) -> str:
+    """A name for `row` that is unique on the page (ids repeat across machines), for element ids
+    and for `open_links`."""
+    peer = peer_of(row)
+    return f"{peer}-{row.session_id}" if peer else row.session_id
+
+
+def open_links(rows: list[SessionRow]) -> dict[str, str]:
+    """The Remote Control link to offer for each of `rows` that has one, by `row_key`: the
+    `open_url` the owning machine worked out from its live sessions (`apply_status` for this
+    machine's own, what the peer sent for a peer's). A stale peer row offers none."""
+    return {row_key(r): r.open_url for r in rows if r.open_url is not None and not _stale(r)}
+
+
 def resume_url(row: SessionRow) -> str:
     """Where Resume on `row` posts: this machine's resume action, or the one forwarding to its
     peer."""
     return session_url(row) + "/resume"
+
+
+def restart_url(row: SessionRow) -> str:
+    """Where Restart with Remote Control on `row` posts: this machine's restart action, or the
+    one forwarding to its peer."""
+    return session_url(row) + "/restart-remote"
+
+
+def busy_keys(rows: list[SessionRow]) -> set[str]:
+    """The `row_key` of each of `rows` whose live session is working now, as its owning machine
+    says (`SessionRow.busy`)."""
+    return {row_key(row) for row in rows if row.busy}
 
 
 templates = Jinja2Templates(directory=WEB_DIR / "templates")
@@ -80,6 +107,12 @@ templates.env.globals["preview"] = _preview
 templates.env.globals["peer_of"] = peer_of
 templates.env.globals["session_url"] = session_url
 templates.env.globals["resume_url"] = resume_url
+templates.env.globals["restart_url"] = restart_url
+templates.env.globals["row_key"] = row_key
+
+
+def _stale(row: SessionRow) -> bool:
+    return isinstance(row, PeerSession) and row.stale
 
 
 def is_active(row: SessionRow) -> bool:
@@ -212,6 +245,9 @@ def sessions_page(
         "all": all_,
         "machines": bool(web.config.peers),
         "offline": offline,
+        "open_links": open_links(rows),
+        "busy": busy_keys(rows),
+        "at_desk": TERMINAL_ALLOWED.get(),
     }
     if request.headers.get("hx-request") == "true":
         # Just the results block, to swap into the page without reloading it.
@@ -238,6 +274,9 @@ def session_page(request: Request, session_id: str) -> Any:
         "chain": links if len(links) > 1 else [],
         "command": resume_command(row),
         "machine": local_machine(web.config),
+        "open_links": open_links([row]),
+        "busy": busy_keys([row]),
+        "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)
 
@@ -261,6 +300,9 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         "command": resume_command(row),
         "machine": peer,
         "result": result,
+        "open_links": open_links([row]),
+        "busy": busy_keys([row]),
+        "at_desk": TERMINAL_ALLOWED.get(),
     }
     return _render(request, "session_detail.html", context)
 
