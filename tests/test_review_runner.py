@@ -111,6 +111,7 @@ def test_review_argv_exact() -> None:
         "--no-session-persistence",
         "--tools",
         "",
+        "--strict-mcp-config",  # no --mcp-config: no MCP server (a project's included) starts
         "--output-format",
         "json",
         "--json-schema",

@@ -105,6 +105,11 @@
           target.append(" ", restart);
         }
       }
+      // A background session keeps its own options: resumed with flags, Claude Code started a
+      // copy of it under a new id (`copy_of`, `session_id`).
+      if (data.ok === true && typeof data.copy_of === "string" && typeof data.session_id === "string") {
+        target.append(" Started as a copy (" + data.session_id.slice(0, 8) + "): this background session keeps its own options.");
+      }
     });
   </script>
   <script>

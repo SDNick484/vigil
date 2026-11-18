@@ -483,7 +483,7 @@ def test_remote_resume_does_not_open_terminal(
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # no Remote Control link turned up in the (short) wait

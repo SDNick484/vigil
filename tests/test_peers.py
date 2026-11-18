@@ -448,7 +448,7 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {HANDMADE}",
+        "attach": f"claude attach {HANDMADE[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # a link did not turn up within the (short) test wait
@@ -552,6 +552,25 @@ def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> No
     with pytest.raises(peers.ResumeForwardError) as refused:
         peers.forward_resume(peer, HANDMADE, transport=network.transport())
     assert refused.value.restartable is False
+
+
+def test_forward_resume_carries_a_copy(tmp_path: Path) -> None:
+    """A peer whose `claude --bg` started a copy of the session says which: passed on when both
+    are session ids, dropped otherwise."""
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    copy = "5e6f7a8b-0000-4000-8000-00000000000c"
+    answer: dict[str, Any] = {"ok": True, "attach": "claude attach 5e6f7a8b"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=answer)
+
+    network = Network(hosts={PEER_B_HOST: handle})
+    answer.update(opened_terminal=False, copy_of=HANDMADE, session_id=copy)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert (forwarded["copy_of"], forwarded["session_id"]) == (HANDMADE, copy)
+    answer.update(session_id="-not an id")
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert "copy_of" not in forwarded and "session_id" not in forwarded
 
 
 def test_forwarded_resume_says_whether_it_was_asked_at_the_desk(machines: Machines) -> None:
@@ -1372,7 +1391,7 @@ def test_forward_suggestion_resume_and_start_new(machines: Machines) -> None:
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {HANDMADE}",
+        "attach": f"claude attach {HANDMADE[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # a link did not turn up within the (short) test wait

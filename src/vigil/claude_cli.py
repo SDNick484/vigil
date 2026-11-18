@@ -5,6 +5,7 @@ output never raises. Callers treat an empty result as "status unknown".
 """
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ _BG_FLAG = re.compile(r"^\s+(?:-\w+,\s+)?--bg\b", re.MULTILINE)
 # A subcommand line in `--help`: two-space indent, then the name ("stop|kill <id>" lists aliases).
 _COMMAND = r"^  {name}(?:\|\w+)*(?:\s|$)"
 _VERSION = re.compile(r"^\s*(\d+\.\d+\.\d+[\w.+-]*)")
+# What `claude --bg` prints once it has started a session: "backgrounded · 1a2b3c4d (idle …)".
+_BACKGROUNDED = re.compile(r"\bbackgrounded\W+([0-9a-f]{8})\b")
 
 
 @dataclass(frozen=True)
@@ -174,3 +177,34 @@ def live_sessions_or_none(
         return None
     out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
     return _parse_live(out) if out is not None else None
+
+
+def background_job(output: str) -> str | None:
+    """The job id (the first 8 characters of the session id) of the session `claude --bg` said
+    it started in `output`, or None when it said none."""
+    match = _BACKGROUNDED.search(output)
+    return match.group(1) if match else None
+
+
+def started_session(output: str, cwd: str, claude: str = "claude") -> str | None:
+    """The full id of the session a `claude --bg` run in `cwd` started, given what it printed:
+    the one running session (`claude agents --json`, asked now) whose id starts with the job id
+    in `output` and whose folder is `cwd`. None when `output` has no job id, the running
+    sessions cannot be listed, or not exactly one matches.
+
+    `claude --bg --resume <id>` may start a copy under a new id (a background session keeps its
+    own options), and without `--resume` it picks the new session's id itself."""
+    job = background_job(output)
+    if job is None:
+        return None
+    out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
+    live = _parse_live(out) if out is not None else None
+    if not live:
+        return None
+    folder = os.path.realpath(cwd)
+    found = [
+        s.session_id
+        for s in live.values()
+        if s.session_id.startswith(job) and s.cwd is not None and os.path.realpath(s.cwd) == folder
+    ]
+    return found[0] if len(found) == 1 else None

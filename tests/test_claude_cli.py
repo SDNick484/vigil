@@ -13,9 +13,11 @@ from vigil import claude_cli
 from vigil.claude_cli import (
     Capabilities,
     LiveSession,
+    background_job,
     capabilities,
     live_sessions,
     live_sessions_or_none,
+    started_session,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_help"
@@ -184,3 +186,37 @@ def test_live_sessions_or_none_lists_nothing_as_empty(fake_bin: FakeBin) -> None
     assert live_sessions_or_none(ALL_CAPS) == {}
     install_claude(fake_bin, version="2.1.312\n", help_text="", agents_json='[{"sessionId": "x"}]')
     assert set(live_sessions_or_none(ALL_CAPS) or {}) == {"x"}
+
+
+BG_OUTPUT = (
+    "Starting background service…\n"
+    "backgrounded · 1a2b3c4d (idle — send a prompt to start)\n"
+    "  claude agents             list sessions\n"
+    "  claude attach 1a2b3c4d    open in this terminal\n"
+)
+
+
+def test_background_job_reads_what_claude_bg_printed() -> None:
+    assert background_job(BG_OUTPUT) == "1a2b3c4d"
+    copy_note = (
+        "note: background session 1a2b3c4d keeps its own saved options, so the flags you passed "
+        "started a copy as 5e6f7a8b. Without flags, the same command continues 1a2b3c4d itself.\n"
+    )
+    assert background_job(copy_note + BG_OUTPUT.replace("1a2b3c4d", "5e6f7a8b")) == "5e6f7a8b"
+    for output in ("", "Starting background service…\n", "backgrounded · nothex12\n"):
+        assert background_job(output) is None
+
+
+def test_started_session_matches_job_id_and_folder(fake_bin: FakeBin, tmp_path: Path) -> None:
+    started = "1a2b3c4d-0000-4000-8000-000000000001"
+    agents = [
+        {"sessionId": "1a2b3c4d-0000-4000-8000-000000000002", "cwd": "/elsewhere"},
+        {"sessionId": started, "cwd": str(tmp_path), "kind": "background"},
+        {"sessionId": "0123abcd-0000-4000-8000-000000000003", "cwd": str(tmp_path)},
+    ]
+    install_claude(fake_bin, version="", help_text="", agents_json=json.dumps(agents))
+    assert started_session(BG_OUTPUT, str(tmp_path)) == started
+    assert started_session(BG_OUTPUT, "/nowhere") is None
+    assert started_session("no job id here", str(tmp_path)) is None
+    install_claude(fake_bin, version="", help_text="", agents_json="garbage")
+    assert started_session(BG_OUTPUT, str(tmp_path)) is None

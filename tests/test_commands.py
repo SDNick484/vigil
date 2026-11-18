@@ -192,7 +192,7 @@ def test_resume_print_does_not_launch(
     code, out, _ = run(capsys, "resume", NAMED, "--print")
     assert code == 0
     assert f"cd {folder} && claude --bg --resume {NAMED}" in out
-    assert f"claude attach {NAMED}" in out
+    assert f"Attach: claude attach {NAMED[:8]}\n" in out
     # Only capability probes ran: nothing started.
     assert all("--resume" not in call.argv for call in vigil_env.bin.calls("claude"))
     conn = connect(vigil_env.index)
@@ -210,8 +210,7 @@ def test_resume_launches_in_the_folder_and_records_it(
     vigil_env.bin.install("claude", stdout=CLAUDE_BG)
     code, out, _ = run(capsys, "resume", NAMED)
     assert code == 0
-    assert f"claude attach {NAMED}" in out
-    assert "No terminal available" in out
+    assert f"No terminal available. Attach with: claude attach {NAMED[:8]}\n" in out
     started = [c for c in vigil_env.bin.calls("claude") if "--resume" in c.argv]
     assert [(c.argv, c.cwd) for c in started] == [
         (["--bg", "--resume", NAMED, "--remote-control"], str(folder))
@@ -220,6 +219,22 @@ def test_resume_launches_in_the_folder_and_records_it(
     rows = conn.execute("SELECT source, session_id FROM launches").fetchall()
     conn.close()
     assert [tuple(row) for row in rows] == [("vigil", NAMED)]
+
+
+def test_resume_says_when_claude_started_a_copy(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_api import COPY, install_claude
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    install_claude(vigil_env, transcript=tmp_path / "unused.jsonl", link=None, copy_as=COPY)
+    code, out, _ = run(capsys, "resume", NAMED)
+    assert code == 0
+    assert f"claude attach {COPY[:8]}" in out
+    assert f"Started as a copy ({COPY[:8]}): this background session keeps its own options." in out
 
 
 def test_resume_refusal_exit_code_2_and_message(

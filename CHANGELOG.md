@@ -32,3 +32,6 @@ All notable changes to this project are recorded here, in the style of
 
 ### Fixed
 - A session started with a local command such as `/model` (or a `!` bash-mode command) is named after the first typed prompt, and command output is no longer taken for a prompt.
+- Resume, Restart with Remote Control and the attach command shown pass `claude attach` and `claude stop` the 8-character job id they require, not the full session id they refuse (Resume's attach command had been wrong since v1).
+- After `claude --bg`, vigil follows the session that actually started (its job id from the output, its full id from `claude agents --json`): a copy of a background session resumed with flags (the answer says so with `copy_of`), or a new session's own id, since `--bg` ignores `--session-id`.
+- Reviews load no MCP servers (`--strict-mcp-config`); a project's `.mcp.json` servers had been started for each review.

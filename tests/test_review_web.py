@@ -4,7 +4,6 @@ import re
 import sqlite3
 import sys
 import time
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,7 @@ from tests.conftest import LOOPBACK_URL, VigilEnv, freeze_tree, thaw_tree
 from tests.test_api import (
     CLAUDE_BG,
     LINK,
+    NEW_BG,
     install_claude,
     remote_client,  # noqa: F401 - a fixture, used by name
 )
@@ -337,7 +337,6 @@ def test_shutdown_stops_a_running_review(vigil_env: VigilEnv, tmp_path: Path) ->
 # Acting on flag suggestions (Task 8). The client sends only the review id and the suggestion's
 # position; the flag always comes from the stored suggestion.
 
-PLACEHOLDER_NEW = "0123abcd-0000-4000-8000-0000000000ff"
 
 CATALOG = [
     ("--model", "Model for the current session"),
@@ -394,7 +393,7 @@ def test_suggestion_resume_uses_stored_flag(
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": False,
@@ -458,52 +457,72 @@ def test_start_new_at_the_desk(
     folder = tmp_path / "work"
     folder.mkdir()
     set_cwd(vigil_env, folder)
-    vigil_env.bin.install("claude", stdout=CLAUDE_BG)
-    monkeypatch.setattr("vigil.web.review.uuid.uuid4", lambda: uuid.UUID(PLACEHOLDER_NEW))
+    install_claude(vigil_env, transcript=tmp_path / "unused.jsonl", link=None)
+    vigil_env.bin.install("xterm")
+    monkeypatch.setenv("DISPLAY", ":99")
     review_id = flag_review(vigil_env, flag_card("--model", "opus"))
     response = web_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
     assert response.status_code == 200, response.text
-    assert response.json()["attach"] == f"claude attach {PLACEHOLDER_NEW}"
-    assert launched(vigil_env) == [
-        (
-            ["--bg", "--session-id", PLACEHOLDER_NEW, "--remote-control", "--model", "opus"],
-            str(folder),
-        )
-    ]
+    # `claude --bg` picks the new session's id; vigil attaches to the one it reports.
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NEW_BG[:8]}",
+        "opened_terminal": True,
+        "remote_url": None,
+        "pending": False,
+        "at_desk": True,
+    }
+    assert launched(vigil_env) == [(["--bg", "--remote-control", "--model", "opus"], str(folder))]
+
+
+def test_start_new_whose_session_cannot_be_found_is_pending(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    install_claude(vigil_env, transcript=tmp_path / "unused.jsonl", link=None, listed=False)
+    vigil_env.bin.install("xterm")
+    monkeypatch.setenv("DISPLAY", ":99")
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+    response = web_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": "claude agents",
+        "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,
+        "at_desk": True,
+    }
+    assert vigil_env.bin.calls("xterm") == []
 
 
 def test_start_new_remote_waits_for_link(
     vigil_env: VigilEnv,
     remote_client: TestClient,  # noqa: F811 - the fixture imported above
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     folder = tmp_path / "work"
     folder.mkdir()
     set_cwd(vigil_env, folder)
-    monkeypatch.setattr("vigil.web.review.uuid.uuid4", lambda: uuid.UUID(PLACEHOLDER_NEW))
     # Claude Code makes the new session's transcript in its project folder; vigil finds it there.
     project = vigil_env.claude_home / "projects" / "-placeholder-work"
     project.mkdir()
-    install_claude(vigil_env, transcript=project / f"{PLACEHOLDER_NEW}.jsonl", link=LINK)
+    install_claude(vigil_env, transcript=project / f"{NEW_BG}.jsonl", link=LINK)
     review_id = flag_review(vigil_env, flag_card("--model", "opus"))
 
     response = remote_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {PLACEHOLDER_NEW}",
+        "attach": f"claude attach {NEW_BG[:8]}",
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
         "at_desk": False,
     }
-    assert launched(vigil_env) == [
-        (
-            ["--bg", "--session-id", PLACEHOLDER_NEW, "--remote-control", "--model", "opus"],
-            str(folder),
-        )
-    ]
+    assert launched(vigil_env) == [(["--bg", "--remote-control", "--model", "opus"], str(folder))]
 
 
 def test_start_new_remote_pending_without_a_link(

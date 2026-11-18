@@ -1,11 +1,13 @@
 """Claude's review of a session: `claude -p` on a fork of it that is not persisted and has no
-tools, run in the session's folder.
+tools or MCP servers, run in the session's folder.
 
     claude -p --resume <id> --fork-session --no-session-persistence --tools "" \\
-      --output-format json --json-schema <SCHEMA> --max-budget-usd <budget> [--model <m>] <prompt>
+      --strict-mcp-config --output-format json --json-schema <SCHEMA> \\
+      --max-budget-usd <budget> [--model <m>] <prompt>
 
 Checked on Claude Code 2.1.312: this leaves no new transcript under the Claude home and does not
-touch the reviewed session's file, so nothing new appears in the index either. `-p` prints one
+touch the reviewed session's file, so nothing new appears in the index either. Without
+`--strict-mcp-config` a project's `.mcp.json` servers were started for the review. `-p` prints one
 JSON object: `type` (`result`), `subtype` (`success`, `error_max_budget_usd`, ...), `is_error`,
 `result` (Claude's text), `structured_output` (the answer as JSON, with `--json-schema`),
 `total_cost_usd`, `errors` (a list of messages) and `modelUsage` (cost per model), among others.
@@ -146,7 +148,9 @@ def _end(process: subprocess.Popen[str], wait: float) -> None:
 
 def review_argv(session_id: str, cfg: ReviewConfig, schema_json: str, prompt: str) -> list[str]:
     """The review command. The prompt is the one positional, last; every flag before it takes
-    exactly one value or none, so none of them can take the prompt as its value."""
+    exactly one value or none, so none of them can take the prompt as its value.
+    `--strict-mcp-config` with no `--mcp-config` loads no MCP server, not even the project's
+    (`.mcp.json`), which Claude Code would otherwise start for the review."""
     return [
         "claude",
         "-p",
@@ -156,6 +160,7 @@ def review_argv(session_id: str, cfg: ReviewConfig, schema_json: str, prompt: st
         "--no-session-persistence",
         "--tools",
         "",
+        "--strict-mcp-config",
         "--output-format",
         "json",
         "--json-schema",

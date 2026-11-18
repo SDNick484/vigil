@@ -21,7 +21,6 @@ checked and cleaned again here (`vigil.peers.review_from_dict`, `change_from_dic
 with the templates here, with links to the mirrors.
 """
 
-import functools
 import json
 import logging
 import os
@@ -72,7 +71,6 @@ from vigil.peers import (
     launch_answer,
     review_from_dict,
 )
-from vigil.remote import find_transcript
 from vigil.resume import ResumeRefused, _check_cwd, plan_start_new, session_lock
 from vigil.review.numbers import numbers_to_dict
 from vigil.review.runner import (
@@ -477,6 +475,7 @@ _ACTION_RESPONSES: dict[int | str, dict[str, Any]] = {
 @router.post(
     "/reviews/{review_id}/suggestions/{index}/resume",
     response_model=ResumeOut,
+    response_model_exclude_unset=True,
     responses=_ACTION_RESPONSES,
 )
 def resume_with_suggestion(
@@ -498,22 +497,25 @@ def resume_with_suggestion(
                 started = _start(web, conn, row, caps, live, tokens)
             except ResumeRefused as refused:
                 return _refusal(409, refused.reason, restartable=refused.restartable)
-    return _answer(web, Path(row.transcript_path), started)
+    return _answer(web, started)
 
 
 @router.post(
     "/reviews/{review_id}/suggestions/{index}/start-new",
     response_model=ResumeOut,
+    response_model_exclude_unset=True,
     responses=_ACTION_RESPONSES,
 )
 def start_new_with_suggestion(
     request: Request, review_id: int, index: int
 ) -> dict[str, object] | JSONResponse:
     """Start a new session in the reviewed session's folder with the flag of suggestion `index`
-    (`vigil.resume.plan_start_new`), under a new id vigil chooses. At the desk a terminal is
-    opened on it; a request from another machine gets none, and waits for its Remote Control
-    link as a resume does (its transcript is found by that id). Answers as a resume does; 409
-    when the flag is refused (before anything is launched) or the start is."""
+    (`vigil.resume.plan_start_new`). Its id is the one `claude --bg` says it started (or, in
+    tmux, one vigil chooses). At the desk a terminal is opened on it; a request from another
+    machine gets none, and waits for its Remote Control link as a resume does (its transcript is
+    found by that id). When the new session's id cannot be found, the answer is pending, with
+    no terminal and no link. Answers as a resume does; 409 when the flag is refused (before
+    anything is launched) or the start is."""
     web = state(request)
     new_id = str(uuid.uuid4())
     with connection(request) as conn:
@@ -527,8 +529,7 @@ def start_new_with_suggestion(
             started = _launch(plan, conn)
         except ResumeRefused as refused:
             return _refusal(409, refused.reason)
-    transcript = functools.partial(find_transcript, web.config.claude_home, new_id)
-    return _answer(web, transcript, started)
+    return _answer(web, started)
 
 
 @router.post(
@@ -813,6 +814,7 @@ def _launch_on_peer(
 @router.post(
     "/peers/{peer}/reviews/{review_id}/suggestions/{index}/resume",
     response_model=ForwardedResumeOut,
+    response_model_exclude_unset=True,
     responses=_PEER_RESPONSES,
 )
 def resume_with_suggestion_on_peer(
@@ -827,6 +829,7 @@ def resume_with_suggestion_on_peer(
 @router.post(
     "/peers/{peer}/reviews/{review_id}/suggestions/{index}/start-new",
     response_model=ForwardedResumeOut,
+    response_model_exclude_unset=True,
     responses=_PEER_RESPONSES,
 )
 def start_new_with_suggestion_on_peer(

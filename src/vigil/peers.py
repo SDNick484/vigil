@@ -383,9 +383,11 @@ def forward_resume(
 
     Returns `{"ok": True, "attach", "opened_terminal", "remote_url", "pending", "machine"}`
     (`remote_url` is the peer's Remote Control link when it is a Claude one, else None; `pending`
-    says it started the session but the link is not there yet). Raises ResumeForwardError:
-    404 for an id that is not a session id, the peer's own 404 or 409 refusal (reason prefixed
-    with the peer's name), else 502 when the peer cannot be reached or refuses the request."""
+    says it started the session but the link is not there yet), with the peer's `copy_of` and
+    `session_id` when it started a copy of the session (both session ids, else left out).
+    Raises ResumeForwardError: 404 for an id that is not a session id, the peer's own 404 or 409
+    refusal (reason prefixed with the peer's name), else 502 when the peer cannot be reached or
+    refuses the request."""
     return _forward_launch(peer, session_id, "resume", None, transport)
 
 
@@ -436,7 +438,7 @@ def launch_answer(name: str, status: int, data: Answer) -> dict[str, object]:
     remote_url = data.get("remote_url")
     if not isinstance(remote_url, str) or not REMOTE_URL.fullmatch(remote_url):
         remote_url = None  # it goes into the user's browser: only ever a Claude link
-    return {
+    answer: dict[str, object] = {
         "ok": True,
         "attach": clean(attach),
         "opened_terminal": data.get("opened_terminal") is True,
@@ -444,6 +446,15 @@ def launch_answer(name: str, status: int, data: Answer) -> dict[str, object]:
         "pending": data.get("pending") is True,
         "machine": name,
     }
+    copy_of, session_id = data.get("copy_of"), data.get("session_id")
+    if (
+        isinstance(copy_of, str)
+        and isinstance(session_id, str)
+        and is_session_id(copy_of)
+        and is_session_id(session_id)
+    ):
+        answer.update(copy_of=copy_of, session_id=session_id)
+    return answer
 
 
 _PASSED_ON = (400, 404, 409)

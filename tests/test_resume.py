@@ -3,6 +3,7 @@
 
 import json
 import sqlite3
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -20,6 +21,7 @@ from vigil.index.queries import SessionRow
 from vigil.remote import find_transcript, wait_for_remote_url
 from vigil.resume import (
     TERMINAL_ALLOWED,
+    Launched,
     ResumePlan,
     ResumeRefused,
     execute,
@@ -32,6 +34,7 @@ from vigil.resume import (
 pytestmark = pytest.mark.usefixtures("proc_version")
 
 SID = "0123abcd-0000-4000-8000-000000000001"
+JOB = "0123abcd"  # its job id: what `claude attach` and `claude stop` take
 ALL_CAPS = Capabilities(version="2.1.312", has_bg=True, has_attach=True, has_agents_json=True)
 OLD_CAPS = Capabilities(version="1.0.0", has_bg=False, has_attach=False, has_agents_json=False)
 RC = ResumeConfig(default_flags=("--remote-control",))
@@ -78,7 +81,7 @@ def test_bg_plan(workdir: Path, env: dict[str, str]) -> None:
     assert plan.method == "bg"
     assert plan.start == ["claude", "--bg", "--resume", SID, "--remote-control"]
     assert plan.start_cwd == str(workdir)
-    assert plan.attach == ["claude", "attach", SID]
+    assert plan.attach == ["claude", "attach", JOB]
     assert plan.terminal is None  # headless
     assert plan.session_id == SID
 
@@ -90,7 +93,7 @@ def test_already_background_skips_start(workdir: Path, env: dict[str, str]) -> N
     plan = plan_resume(make_session(str(workdir)), ALL_CAPS, live, cfg, env)
     assert plan.start is None
     assert plan.method == "bg"
-    assert plan.attach == ["claude", "attach", SID]
+    assert plan.attach == ["claude", "attach", JOB]
 
 
 def test_open_interactive_refused(workdir: Path, env: dict[str, str]) -> None:
@@ -221,14 +224,14 @@ def test_bad_terminal_template_refused(workdir: Path, env: dict[str, str]) -> No
 def test_plan_includes_terminal(workdir: Path, fake_bin: FakeBin, env: dict[str, str]) -> None:
     fake_bin.install("xterm")
     plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, {**env, "DISPLAY": ":0"})
-    assert plan.terminal == ["xterm", "-e", "claude", "attach", SID]
+    assert plan.terminal == ["xterm", "-e", "claude", "attach", JOB]
 
 
 def bg_plan(workdir: Path, terminal: list[str] | None) -> ResumePlan:
     return ResumePlan(
         start=["claude", "--bg", "--resume", SID, "--model", "opus", "--remote-control"],
         start_cwd=str(workdir),
-        attach=["claude", "attach", SID],
+        attach=["claude", "attach", JOB],
         terminal=terminal,
         method="bg",
         session_id=SID,
@@ -238,19 +241,19 @@ def bg_plan(workdir: Path, terminal: list[str] | None) -> ResumePlan:
 def test_execute_runs_fakes_with_cwd(workdir: Path, fake_bin: FakeBin, env: dict[str, str]) -> None:
     fake_bin.install("xterm")
     plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, {**env, "DISPLAY": ":0"})
-    assert execute(plan) == f"claude attach {SID}"
+    assert execute(plan).attach == f"claude attach {JOB}"
     [claude] = fake_bin.calls("claude")
     assert claude.argv == ["--bg", "--resume", SID, "--remote-control"]
     assert claude.cwd == str(workdir)
     [xterm] = wait_for_calls(fake_bin, "xterm")
-    assert xterm.argv == ["-e", "claude", "attach", SID]
+    assert xterm.argv == ["-e", "claude", "attach", JOB]
     assert xterm.cwd == str(workdir)
 
 
 def test_execute_tmux(workdir: Path, fake_bin: FakeBin, env: dict[str, str]) -> None:
     fake_bin.install("tmux")
     plan = plan_resume(make_session(str(workdir)), OLD_CAPS, {}, RC, env)
-    assert execute(plan) == "tmux attach -t vigil-0123abcd"
+    assert execute(plan).attach == "tmux attach -t vigil-0123abcd"
     assert plan.start is not None
     [tmux] = fake_bin.calls("tmux")
     assert tmux.argv == plan.start[1:]
@@ -272,7 +275,7 @@ def test_execute_start_failure_refused(workdir: Path, fake_bin: FakeBin) -> None
     fake_bin.install("claude", exit_code=1)
     fake_bin.install("xterm")
     with pytest.raises(ResumeRefused, match="exited with 1"):
-        execute(bg_plan(workdir, ["xterm", "-e", "claude", "attach", SID]))
+        execute(bg_plan(workdir, ["xterm", "-e", "claude", "attach", JOB]))
     assert fake_bin.calls("xterm") == []
 
 
@@ -284,8 +287,8 @@ def test_execute_start_missing_refused(workdir: Path, fake_bin: FakeBin) -> None
 def test_execute_terminal_missing_still_returns_attach(
     workdir: Path, fake_bin: FakeBin, env: dict[str, str]
 ) -> None:
-    plan = bg_plan(workdir, ["not-installed-terminal", "-e", "claude", "attach", SID])
-    assert execute(plan) == f"claude attach {SID}"
+    plan = bg_plan(workdir, ["not-installed-terminal", "-e", "claude", "attach", JOB])
+    assert execute(plan).attach == f"claude attach {JOB}"
     assert len(fake_bin.calls("claude")) == 1
 
 
@@ -305,7 +308,7 @@ def test_execute_records_launch(
     workdir: Path, fake_bin: FakeBin, env: dict[str, str], conn: sqlite3.Connection
 ) -> None:
     fake_bin.install("xterm")
-    execute(bg_plan(workdir, ["xterm", "-e", "claude", "attach", SID]), conn=conn)
+    execute(bg_plan(workdir, ["xterm", "-e", "claude", "attach", JOB]), conn=conn)
     # Flag names only: the "opus" value is never stored.
     assert launches(conn) == [
         ("vigil", None, ["--bg", "--resume", "--model", "--remote-control"], SID),
@@ -388,7 +391,7 @@ def test_remote_bg_without_link_is_restartable(workdir: Path, env: dict[str, str
         TERMINAL_ALLOWED.reset(token)
     assert refused.value.restartable is True
     assert "without Remote Control" in refused.value.reason
-    assert f"claude attach {SID}" in refused.value.reason
+    assert f"claude attach {JOB}" in refused.value.reason
     assert "/remote-control" in refused.value.reason
     # At the desk the same session is simply attached to.
     plan = plan_resume(make_session(str(workdir)), ALL_CAPS, background(workdir), RC, env)
@@ -522,7 +525,7 @@ def test_stop_session_waits_until_gone(fake_bin: FakeBin, env: dict[str, str]) -
         return {} if gone else {SID: LiveSession(SID, "background", None, "/x")}
 
     stop_session(SID, probe, clock=clock, sleep=clock.sleep)
-    assert [call.argv for call in fake_bin.calls("claude")] == [["stop", SID]]
+    assert [call.argv for call in fake_bin.calls("claude")] == [["stop", JOB]]
     assert probes == [0.0, 0.5, 1.0, 1.5]
 
 
@@ -538,7 +541,7 @@ def test_stop_session_refuses_when_still_live(fake_bin: FakeBin, env: dict[str, 
     assert refused.value.restartable is False
     assert clock.now >= 2.0
     # Only `claude stop` ran: nothing was started.
-    assert [call.argv for call in fake_bin.calls("claude")] == [["stop", SID]]
+    assert [call.argv for call in fake_bin.calls("claude")] == [["stop", JOB]]
 
 
 def test_stop_session_refuses_on_exit_code(fake_bin: FakeBin) -> None:
@@ -604,20 +607,12 @@ def test_start_new_bg_argv(workdir: Path, env: dict[str, str]) -> None:
     cfg = ResumeConfig(default_flags=("--verbose",))
     plan = plan_start_new(str(workdir), ["--model", "opus"], ALL_CAPS, cfg, env, NEW_ID)
     assert plan.method == "bg"
-    assert plan.start == [
-        "claude",
-        "--bg",
-        "--session-id",
-        NEW_ID,
-        "--remote-control",
-        "--verbose",
-        "--model",
-        "opus",
-    ]
+    # `claude --bg` picks the new session's id itself (it ignores `--session-id`).
+    assert plan.start == ["claude", "--bg", "--remote-control", "--verbose", "--model", "opus"]
     assert plan.start_cwd == str(workdir)
-    assert plan.attach == ["claude", "attach", NEW_ID]
     assert plan.terminal is None  # headless
-    assert plan.session_id == NEW_ID
+    assert plan.session_id is None  # known once it has started (`execute`)
+    assert plan.attach == ["claude", "agents"]  # until then, list the sessions to find it
 
 
 def test_start_new_tmux_argv(workdir: Path, fake_bin: FakeBin, env: dict[str, str]) -> None:
@@ -675,3 +670,130 @@ def test_wait_for_remote_url_finds_a_new_sessions_transcript(tmp_path: Path) -> 
     assert wait_for_remote_url(look, LAUNCH, 30.0, clock=time_.clock, sleep=time_.sleep) == LINK
     assert time_.sleeps == [0.5, 0.5]
     assert find_transcript(home, NEW_ID) == project / f"{NEW_ID}.jsonl"
+
+
+COPY = "5e6f7a8b-0000-4000-8000-0000000000cc"
+
+_BG_CLAUDE = """#!{python}
+import json, os, sys
+args = sys.argv[1:]
+with open({log!r}, "a") as handle:
+    handle.write(json.dumps({{"argv": args, "cwd": os.getcwd()}}) + "\\n")
+if args[:1] == ["agents"]:
+    sys.stdout.write(json.dumps({live!r}))
+elif "--bg" in args:
+    sys.stdout.write({output!r})
+"""
+
+
+def install_bg_claude(
+    fake_bin: FakeBin, output: str, live: list[dict[str, object]] | None = None
+) -> None:
+    """A fake `claude` whose `--bg` prints `output` and whose `agents --json` lists `live`."""
+    script = fake_bin.directory / "claude"
+    script.write_text(
+        _BG_CLAUDE.format(
+            python=sys.executable,
+            log=str(fake_bin.directory / ".calls" / "claude.jsonl"),
+            output=output,
+            live=live or [],
+        )
+    )
+    script.chmod(0o755)
+
+
+def backgrounded(session_id: str, note: str = "") -> str:
+    """What the real `claude --bg` prints once it has started `session_id`."""
+    job = session_id[:8]
+    return (
+        note
+        + "Starting background service…\n"
+        + f"backgrounded · {job} (idle — send a prompt to start)\n"
+        + "  claude agents             list sessions\n"
+        + f"  claude attach {job}    open in this terminal\n"
+    )
+
+
+def entry(session_id: str, cwd: Path | str) -> dict[str, object]:
+    return {"sessionId": session_id, "kind": "background", "cwd": str(cwd), "status": "idle"}
+
+
+def test_execute_attaches_to_the_copy_claude_started(
+    workdir: Path, fake_bin: FakeBin, env: dict[str, str], conn: sqlite3.Connection
+) -> None:
+    # A session that was itself started in the background keeps its own options: resumed with
+    # flags, `claude --bg` starts a copy under a new id, and says so.
+    note = (
+        f"note: background session {JOB} keeps its own saved options, so the flags you passed "
+        f"started a copy as {COPY[:8]}. Without flags, the same command continues {JOB} itself.\n"
+    )
+    install_bg_claude(
+        fake_bin, backgrounded(COPY, note), [entry(SID, "/elsewhere"), entry(COPY, workdir)]
+    )
+    fake_bin.install("xterm")
+    plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, {**env, "DISPLAY": ":0"})
+    launched = execute(plan, conn=conn)
+    assert launched == Launched(
+        attach=f"claude attach {COPY[:8]}",
+        terminal=["xterm", "-e", "claude", "attach", COPY[:8]],
+        session_id=COPY,
+        copy_of=SID,
+    )
+    [xterm] = wait_for_calls(fake_bin, "xterm")
+    assert xterm.argv == ["-e", "claude", "attach", COPY[:8]]
+    assert [session for *_, session in launches(conn)] == [COPY, COPY]
+
+
+def test_execute_resumed_in_place(workdir: Path, fake_bin: FakeBin, env: dict[str, str]) -> None:
+    install_bg_claude(fake_bin, backgrounded(SID), [entry(SID, workdir)])
+    plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, env)
+    assert execute(plan) == Launched(f"claude attach {JOB}", None, SID)
+
+
+@pytest.mark.parametrize(
+    ("output", "live"),
+    [
+        ("Starting background service…\n", "listed"),  # no job id printed
+        (backgrounded(COPY), "missing"),  # not listed as running
+        (backgrounded(COPY), "elsewhere"),  # listed, but in another folder
+        (backgrounded(COPY), "unlisted"),  # the running sessions cannot be listed
+    ],
+)
+def test_execute_falls_back_to_the_requested_session(
+    workdir: Path, fake_bin: FakeBin, env: dict[str, str], output: str, live: str
+) -> None:
+    sessions = {
+        "listed": [entry(COPY, workdir)],
+        "missing": [entry(SID, workdir)],
+        "elsewhere": [entry(COPY, "/elsewhere")],
+        "unlisted": "not json",
+    }[live]
+    install_bg_claude(fake_bin, output, sessions)  # type: ignore[arg-type]
+    plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, env)
+    assert execute(plan) == Launched(f"claude attach {JOB}", None, SID)
+
+
+def test_execute_start_new_finds_the_new_session(
+    workdir: Path, fake_bin: FakeBin, env: dict[str, str], conn: sqlite3.Connection
+) -> None:
+    install_bg_claude(fake_bin, backgrounded(COPY), [entry(COPY, workdir)])
+    fake_bin.install("xterm")
+    plan = plan_start_new(str(workdir), [], ALL_CAPS, RC, {**env, "DISPLAY": ":0"}, NEW_ID)
+    assert execute(plan, conn=conn) == Launched(
+        f"claude attach {COPY[:8]}", ["xterm", "-e", "claude", "attach", COPY[:8]], COPY
+    )
+    [xterm] = wait_for_calls(fake_bin, "xterm")
+    assert xterm.argv == ["-e", "claude", "attach", COPY[:8]]
+    assert [session for *_, session in launches(conn)] == [COPY, COPY]
+
+
+def test_execute_start_new_without_its_id_opens_no_terminal(
+    workdir: Path, fake_bin: FakeBin, env: dict[str, str], conn: sqlite3.Connection
+) -> None:
+    install_bg_claude(fake_bin, "Starting background service…\n", [])
+    fake_bin.install("xterm")
+    plan = plan_start_new(str(workdir), [], ALL_CAPS, RC, {**env, "DISPLAY": ":0"}, NEW_ID)
+    # Started, but which session it is cannot be told: list them to find it.
+    assert execute(plan, conn=conn) == Launched("claude agents", None, None)
+    assert fake_bin.calls("xterm") == []
+    assert launches(conn) == [("vigil", None, ["--bg", "--remote-control"], None)]

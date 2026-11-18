@@ -288,11 +288,16 @@ pages:
   request from another device, `remote_url` is the session's Remote Control link and `pending`
   says it was started but no link turned up in time (see
   [Joining from a phone](#joining-from-a-phone)); `at_desk` says the request came from this
-  machine; `restartable` says Restart with Remote Control would get past the refusal.
+  machine; `restartable` says Restart with Remote Control would get past the refusal. The attach
+  command takes the session's 8-character job id (`claude attach 1a2b3c4d`), as `claude attach`
+  requires. When `claude --bg` started a copy of the session under a new id (see
+  [Joining from a phone](#joining-from-a-phone)), the answer also has `"copy_of": "<id asked
+  for>"` and `"session_id": "<the copy's id>"`, and the attach command and link are the copy's.
 - `POST /sessions/{id}/restart-remote` with the form field `confirm=yes` (400 without it) stops a
-  session running in the background (`claude stop`) and starts it again with Remote Control. It
-  answers like a resume; a session that can already be joined is not stopped, and the answer
-  carries its link. 409 when the session is not running in the background, or cannot be stopped
+  session running in the background (`claude stop <job id>`) and starts it again with Remote
+  Control. It answers like a resume (such a session comes back as a copy, with `copy_of` and
+  `session_id`); a session that can already be joined is not stopped, and the answer carries its
+  link. 409 when the session is not running in the background, or cannot be stopped
   or started again (the reason says which).
 - `POST /sessions/{id}/meta` sets vigil's own `label`, `note`, `pinned` and `archived` from form
   fields and returns the updated session. Only the fields sent change; an empty `label` or `note`
@@ -341,11 +346,13 @@ result; `--json` prints it as the API serves it) asks Claude what would make ses
 one go better or cost less. vigil runs, in the session's folder:
 
     claude -p --resume <id> --fork-session --no-session-persistence --tools "" \
-      --output-format json --json-schema <schema> --max-budget-usd <review.max_budget_usd> \
-      [--model <review.model>] "<review prompt>"
+      --strict-mcp-config --output-format json --json-schema <schema> \
+      --max-budget-usd <review.max_budget_usd> [--model <review.model>] "<review prompt>"
 
 Claude reads a fork of the whole session that is not saved and has no tools, so the session itself
-is untouched and nothing new appears under `~/.claude`. The prompt carries the token numbers vigil
+is untouched and nothing new appears under `~/.claude`. No MCP server is loaded either, not even
+the project's own (`.mcp.json`): `--strict-mcp-config` with no `--mcp-config` keeps them out, so
+a review starts no server processes and has no tools beyond answering. The prompt carries the token numbers vigil
 computed from the transcript, the flags vigil launched the session with (only launches vigil made,
 so they may be incomplete), your `resume.default_flags` and the flags and subcommands of the
 installed `claude`. Claude answers with at most ten suggestions, each a flag, a change to
@@ -369,9 +376,12 @@ installed `claude`) has three buttons:
 - **Resume with these** resumes the session with the flag added for that launch only. A session
   that is already running is joined or attached to as it is.
 - **Start new session with these** starts a new session in the reviewed session's folder,
-  `claude --bg --session-id <new id> --remote-control [default flags] <flag>` (tmux when there is
-  no `--bg`). At the desk it opens a terminal; from another device it waits for the Remote Control
-  link, like Resume.
+  `claude --bg --remote-control [default flags] <flag>`. `claude --bg` picks the new session's id;
+  vigil reads it from what `claude --bg` prints and `claude agents --json`. With tmux (when there
+  is no `--bg`) it runs `claude --session-id <new id> …` under an id vigil chooses. At the desk it
+  opens a terminal; from another device it waits for the Remote Control link, like Resume. If
+  vigil cannot tell which session started, it says the session started and its link is pending;
+  `claude agents` lists it.
 - **Always use** adds the flag to `resume.default_flags` in vigil's config file, replacing the
   value of a flag already there. The rest of the file, comments included, is kept as written, and
   the file is only replaced when the result is a valid config. This is the only write to vigil's
@@ -454,7 +464,8 @@ the session if it is not running, waits (up to `resume.remote_link_timeout` seco
 Remote Control link (a live session that has one is joined as it is), and the page goes to that
 link. If no link turns up in time, the page says the session started but its link is pending,
 and to try the session page again in a moment. The answer also carries the attach command (e.g.
-`claude attach <id>`) to run on that machine, for instance over SSH. See
+`claude attach 1a2b3c4d`, with the session's 8-character job id) to run on that machine, for
+instance over SSH. See
 [Joining from a phone](#joining-from-a-phone).
 
 **Behind a reverse proxy** (nginx, Caddy and the like), point the proxy at
@@ -482,6 +493,13 @@ or at claude.ai from your phone. With [remote access](#remote-access) on, open v
   right now says so. Only after you confirm does vigil stop it and start it again with
   `--remote-control`, then open the link as Resume does. A session open in a terminal is never
   stopped; type `/remote-control` in that terminal to make it joinable.
+- **Started as a copy.** A session that was itself started in the background keeps its own saved
+  options: resumed with flags (`--remote-control` among them), Claude Code starts a copy of it
+  under a new id, with its own transcript, and leaves the original stopped. Restart with Remote
+  Control on such a session therefore always brings back a copy. vigil follows the session that
+  actually started, so the link and the attach command are the copy's, and the page says
+  "Started as a copy (<job id>): this background session keeps its own options." A session that
+  was started in a terminal or with `-p` is resumed under its own id.
 
 ## Peers
 

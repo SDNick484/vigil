@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import VigilEnv, freeze_tree, thaw_tree
+from tests.conftest import NO_JOB, VigilEnv, freeze_tree, thaw_tree
 from vigil.claude_cli import LiveSession
 from vigil.config import load_config
 from vigil.index.db import connect
@@ -240,7 +240,7 @@ def test_resume_ok_returns_attach(
     # No display in the test environment, so no terminal: the caller shows the attach command.
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": False,
@@ -266,7 +266,7 @@ def test_resume_opens_terminal_when_there_is_one(
     response = web_client.post(f"/sessions/{NAMED}/resume")
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": True,
         "remote_url": None,
         "pending": False,
@@ -394,28 +394,71 @@ REMOTE_URL = f"http://{REMOTE_HOST}:7787"
 REMOTE_PEER = ("192.0.2.10", 50000)  # TEST-NET-1: never a real client
 TOKEN = "test-token-" + "0123456789abcdef" * 2  # a placeholder, not a real secret
 
+NEW_BG = "0f1e2d3c-0000-4000-8000-00000000000b"
+"""The id of a session a fake `claude --bg` starts without `--resume` (claude, not vigil, picks
+it)."""
+COPY = "5e6f7a8b-0000-4000-8000-00000000000c"
+"""The id of the copy a fake `claude --bg --resume` starts for a session that keeps its own
+options."""
+
 _LINKING_CLAUDE = """#!{python}
-import datetime, json, os, sys, time
+import datetime, json, os, re, sys, time
+args = sys.argv[1:]
 with open({log!r}, "a") as handle:
-    handle.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
+    handle.write(json.dumps({{"argv": args, "cwd": os.getcwd()}}) + "\\n")
 stopped = os.path.exists({marker!r})
-if "stop" in sys.argv:
+if args[:1] in (["attach"], ["stop"], ["logs"]):
+    job = args[1] if len(args) > 1 else ""
+    if not re.fullmatch("[0-9a-f]{{8}}", job):
+        sys.stderr.write({no_job!r}.format(job))
+        sys.exit(1)
+if args[:1] == ["stop"]:
     time.sleep({stop_delay!r})
     if {stop_code!r} == 0:
         open({marker!r}, "w").close()
+        sys.stdout.write("stopped " + args[1] + "\\n")
     sys.exit({stop_code!r})
-if "agents" in sys.argv:
+if "agents" in args:
     if stopped and {agents_fail!r}:
         sys.exit(1)
-    sys.stdout.write("[]" if stopped else {live!r})
+    running = [] if stopped else json.loads({live!r})
+    if os.path.exists({started!r}):
+        with open({started!r}) as handle:
+            running += [json.loads(line) for line in handle]
+    sys.stdout.write(json.dumps(running))
     sys.exit(0)
-if "--bg" in sys.argv and {bg_code!r}:
+if "--bg" in args and {bg_code!r}:
     sys.exit({bg_code!r})
-if "--bg" in sys.argv and {link!r}:
-    record = {{"type": "system", "subtype": "bridge_status", "url": {link!r},
-              "timestamp": datetime.datetime.now(datetime.UTC).isoformat()}}
-    with open({transcript!r}, "a") as handle:
-        handle.write(json.dumps(record) + "\\n")
+if "--bg" in args:
+    if "--session-id" in args:
+        sys.stderr.write("warning: --bg manages the session id; ignoring --session-id "
+                         "(use --resume <id> to continue an existing session)\\n")
+    if "--resume" in args:
+        resumed = args[args.index("--resume") + 1]
+        session = {copy_as!r} or resumed
+        if session != resumed:
+            print(f"note: background session {{resumed[:8]}} keeps its own saved options, so the "
+                  f"flags you passed started a copy as {{session[:8]}}. Without flags, the same "
+                  f"command continues {{resumed[:8]}} itself.")
+    else:
+        session = {new_id!r}
+    print("Starting background service\\u2026")
+    print(f"backgrounded \\u00b7 {{session[:8]}} (idle \\u2014 send a prompt to start)")
+    print("  claude agents             list sessions")
+    print(f"  claude attach {{session[:8]}}    open in this terminal")
+    now = datetime.datetime.now(datetime.UTC)
+    if {listed!r}:
+        entry = {{"sessionId": session, "kind": "background", "cwd": os.getcwd(),
+                 "status": "idle", "name": session[:8],
+                 "startedAt": int(now.timestamp() * 1000) - 1}}
+        with open({started!r}, "a") as handle:
+            handle.write(json.dumps(entry) + "\\n")
+    if {link!r}:
+        record = {{"type": "system", "subtype": "bridge_status", "url": {link!r},
+                  "timestamp": now.isoformat()}}
+        with open(os.path.join({transcripts!r}, session + ".jsonl"), "a") as handle:
+            handle.write(json.dumps(record) + "\\n")
+    sys.exit(0)
 sys.stdout.write({help!r})
 """
 
@@ -430,12 +473,22 @@ def install_claude(
     stop_delay: float = 0.0,
     agents_fail: bool = False,
     bg_code: int = 0,
+    copy_as: str | None = None,
+    new_id: str = NEW_BG,
+    listed: bool = True,
 ) -> None:
-    """A fake `claude` that reports `live` for `agents --json` and, when started with `--bg`,
-    appends a `bridge_status` line with `link` to `transcript` (as Claude Code would once Remote
-    Control is up). `stop` removes the session from `live` (and exits `stop_code`, after
-    `stop_delay` seconds); once stopped, `agents_fail` makes listing fail; `--bg` exits `bg_code`.
-    It records its argv and cwd like every FakeBin program."""
+    """A fake `claude` that behaves as the real one does where vigil depends on it.
+
+    `agents --json` reports `live` plus every session it started (unless `listed` is False).
+    `--bg` prints what the real one prints, `backgrounded · <job id>`: `--resume <id>` starts
+    that session, or a copy under the id `copy_as` (saying so, as for a session that keeps its own
+    options); without `--resume` it starts `new_id` (it ignores `--session-id`, with the real
+    warning). Once started it appends a `bridge_status` line with `link` to that session's
+    transcript in the folder of `transcript` (as Claude Code would once Remote Control is up).
+    `attach`, `stop` and `logs` refuse anything but a job id. `stop` removes the sessions in
+    `live` (and exits `stop_code`, after `stop_delay` seconds); once stopped, `agents_fail` makes
+    listing fail; `--bg` exits `bg_code`. It records its argv and cwd like every FakeBin
+    program."""
     env.bin.install("claude", stdout=CLAUDE_BG)
     script = env.bin.directory / "claude"
     script.write_text(
@@ -444,12 +497,17 @@ def install_claude(
             log=str(env.bin.directory / ".calls" / "claude.jsonl"),
             live=json.dumps(live or []),
             marker=str(env.bin.directory / ".stopped"),
+            started=str(env.bin.directory / ".started"),
             stop_code=stop_code,
             stop_delay=stop_delay,
             agents_fail=agents_fail,
             bg_code=bg_code,
+            copy_as=copy_as,
+            new_id=new_id,
+            listed=listed,
             link=link,
-            transcript=str(transcript),
+            transcripts=str(transcript.parent),
+            no_job=NO_JOB,
             help=CLAUDE_BG,
         )
     )
@@ -501,13 +559,58 @@ def test_remote_resume_returns_link(
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
         "at_desk": False,
     }
     assert started(vigil_env) == [["--bg", "--resume", NAMED, "--remote-control"]]
+
+
+def test_remote_resume_started_as_a_copy_answers_with_the_copy(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    # A session started in the background keeps its own options: `claude --bg --resume` with
+    # flags starts a copy, whose transcript gets the link; the original stays stopped.
+    install_claude(vigil_env, transcript=transcript, link=LINK, copy_as=COPY)
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {COPY[:8]}",
+        "opened_terminal": False,
+        "remote_url": LINK,
+        "pending": False,
+        "at_desk": False,
+        "copy_of": NAMED,
+        "session_id": COPY,
+    }
+    assert LINK not in transcript.read_text()  # the link is the copy's, not the original's
+    conn = connect(vigil_env.index)
+    launches = conn.execute("SELECT session_id FROM launches").fetchall()
+    conn.close()
+    assert [row[0] for row in launches] == [COPY]
+
+
+def test_remote_resume_falls_back_to_the_requested_session(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    # The copy cannot be found among the running sessions: vigil looks for the link of the
+    # session it asked for, and says it is pending.
+    install_claude(vigil_env, transcript=transcript, link=LINK, copy_as=COPY, listed=False)
+    response = remote_client.post(f"/sessions/{NAMED}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NAMED[:8]}",
+        "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,
+        "at_desk": False,
+    }
 
 
 def test_remote_resume_ignores_older_link(
@@ -524,7 +627,7 @@ def test_remote_resume_ignores_older_link(
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,
@@ -553,7 +656,7 @@ def test_second_remote_tap_opens_existing_link(
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
@@ -630,7 +733,7 @@ def test_restart_remote_returns_link(
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
@@ -638,7 +741,25 @@ def test_restart_remote_returns_link(
     }
     # Stopped first, then started again with Remote Control, in its folder.
     assert claude_calls(vigil_env) == [
-        ["stop", NAMED],
+        ["stop", NAMED[:8]],
+        ["--bg", "--resume", NAMED, "--remote-control"],
+    ]
+
+
+def test_restart_of_a_background_session_comes_back_as_a_copy(
+    vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
+) -> None:
+    transcript = start_in(vigil_env, tmp_path)
+    install_claude(
+        vigil_env, transcript=transcript, link=LINK, live=background_live(tmp_path), copy_as=COPY
+    )
+    response = remote_client.post(f"/sessions/{NAMED}/restart-remote", data={"confirm": "yes"})
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert (answer["copy_of"], answer["session_id"]) == (NAMED, COPY)
+    assert (answer["attach"], answer["remote_url"]) == (f"claude attach {COPY[:8]}", LINK)
+    assert claude_calls(vigil_env) == [
+        ["stop", NAMED[:8]],
         ["--bg", "--resume", NAMED, "--remote-control"],
     ]
 
@@ -656,7 +777,7 @@ def test_restart_of_a_session_that_is_already_joinable_stops_nothing(
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED}",
+        "attach": f"claude attach {NAMED[:8]}",
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
@@ -766,7 +887,8 @@ def test_concurrent_restarts_launch_once(
         thread.start()
     for thread in threads:
         thread.join()
-    assert sorted(answers) == [200, 409]
+    # The second finds the session running again with its link, and joins it as it is.
+    assert answers == [200, 200]
     assert started(vigil_env) == [["--bg", "--resume", NAMED, "--remote-control"]]
     assert [argv[0] for argv in claude_calls(vigil_env)].count("stop") == 1
 

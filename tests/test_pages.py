@@ -422,6 +422,8 @@ def test_resume_answer_handler_follows_link_and_offers_restart(web_client: TestC
         "data.at_desk === true",  # at the desk the link is shown, not followed
         "data.pending",
         "the Remote Control link is not available yet",
+        "data.copy_of",  # a background session that keeps its own options came back as a copy
+        "this background session keeps its own options.",
         "data.restartable",
         "Restart with Remote Control",
         "restart-confirm",
