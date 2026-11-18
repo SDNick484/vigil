@@ -194,8 +194,10 @@ claude -p --resume <id> --fork-session --no-session-persistence --tools "" \
 - The fork is not persisted and has no tools, so the reviewed session is untouched and nothing
   new appears in the index. The builder verifies this on the installed version (see "Left to
   the builder").
-- Config: `[review]` with `max_budget_usd` (default 1.00, my call) and `model` (default unset:
-  Claude Code's default).
+- Config: `[review]` with `max_budget_usd` (default 3.00) and `model` (default `sonnet`), decided
+  with the author after a real run: one Opus turn on a small session cost $1.07 at list price,
+  mostly Claude Code's own system prompt, and the budget is only checked after a turn, so an
+  answer that arrives over budget is kept with a note.
 - Output schema, one list `suggestions`, each item:
   - `kind`: `flag` | `file` | `habit`
   - `title` (≤ 80 chars), `why` (≤ 500 chars), `evidence` (≤ 500 chars: turn number or short
@@ -286,7 +288,7 @@ suggestions come from Claude reading the session and should be checked.
 - Remote link wait: 30 s, configurable. Stop wait for Restart with Remote Control: 10 s.
 - vigil adds `--remote-control` to every background session it starts.
 - A review's launch flags come only from launches vigil made itself.
-- One review at a time per machine. Review budget defaults to $1.00.
+- One review at a time per machine.
 - Review runs on a non-persisted fork of the session (the full conversation) rather than on a
   digest vigil builds. This costs more tokens on long sessions but lets Claude see what
   happened. If cost turns out to matter, a digest mode can come later.
