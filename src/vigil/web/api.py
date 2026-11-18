@@ -6,11 +6,12 @@ it), so `vigil ls --json` and `vigil show --json` print the same shapes. Every s
 its status from the live sessions, cached for a few seconds (`vigil.web.LiveStatus`).
 """
 
+import functools
 import os
 import shlex
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -34,11 +35,13 @@ from vigil.index.queries import (
     set_meta,
 )
 from vigil.peers import ResumeForwardError
-from vigil.remote import wait_for_remote_url
+from vigil.remote import find_transcript, wait_for_remote_url
 from vigil.resume import (
     TERMINAL_ALLOWED,
+    Launched,
     ResumePlan,
     ResumeRefused,
+    attach_argv,
     execute,
     joinable_link,
     plan_resume,
@@ -143,13 +146,21 @@ class HealthOut(BaseModel):
 class ResumeOut(BaseModel):
     """`remote_url` is the session's Remote Control link, set for a request from another machine
     (which gets no terminal) once the session has one; `pending` says the session was started for
-    that request but no link had appeared within `resume.remote_link_timeout`."""
+    that request but no link had appeared within `resume.remote_link_timeout`. `at_desk` says the
+    request was made at this machine (loopback): the page shows a link there rather than going
+    to it. `copy_of` is only there when `claude --bg` started a copy of the session asked for
+    (`copy_of`) under a new id (`session_id`, when it could be found; else `attach` names the
+    copy by its job id), as it does for a session that was itself started in the background:
+    that session keeps its own options."""
 
     ok: Literal[True]
     attach: str
     opened_terminal: bool
     remote_url: str | None = None
     pending: bool = False
+    at_desk: bool = False
+    copy_of: str | None = None
+    session_id: str | None = None
 
 
 class RefusalOut(BaseModel):
@@ -325,6 +336,7 @@ def _refusal(status: int, reason: str, *, restartable: bool | None = None) -> JS
 @actions.post(
     "/sessions/{session_id}/resume",
     response_model=ResumeOut,
+    response_model_exclude_unset=True,
     responses={404: {"model": RefusalOut}, 409: {"model": RefusalOut}},
 )
 def resume(request: Request, session_id: str) -> dict[str, object] | JSONResponse:
@@ -352,12 +364,11 @@ def resume(request: Request, session_id: str) -> dict[str, object] | JSONRespons
                 started = _start(web, conn, row, caps, live)
             except ResumeRefused as refused:
                 return _refusal(409, refused.reason, restartable=refused.restartable)
-    return _answer(web, row, started)
+    return _answer(web, started)
 
 
 class _Started(NamedTuple):
-    plan: ResumePlan
-    attach: str
+    launched: Launched
     launched_at: datetime | None
     """When the session was started, or None when it was already running and nothing was."""
     link: str | None
@@ -370,14 +381,26 @@ def _start(
     row: SessionRow,
     caps: Capabilities,
     live: dict[str, LiveSession],
+    extra_flags: Sequence[str] = (),
 ) -> _Started:
-    """Plan the resume of `row` against `live` and carry it out. Raises ResumeRefused."""
-    plan = plan_resume(row, caps, live, web.config.resume, os.environ)
+    """Plan the resume of `row` against `live` (with `extra_flags` if it is started) and carry it
+    out. Raises ResumeRefused."""
+    plan = plan_resume(row, caps, live, web.config.resume, os.environ, extra_flags)
     if not TERMINAL_ALLOWED.get() and plan.start is None:
         # Live with a link (plan_resume refuses it without one): start nothing.
-        return _Started(plan, shlex.join(plan.attach), None, joinable_link(row, live))
+        return _Started(_as_it_is(plan), None, joinable_link(row, live))
+    return _launch(plan, conn)
+
+
+def _as_it_is(plan: ResumePlan) -> Launched:
+    """What answering with `plan` without carrying it out leaves (a live session's link)."""
+    return Launched(shlex.join(plan.attach), plan.terminal, plan.session_id)
+
+
+def _launch(plan: ResumePlan, conn: sqlite3.Connection) -> _Started:
+    """Carry out `plan`, which starts a session. Raises ResumeRefused."""
     launched_at = datetime.now(UTC)
-    return _Started(plan, execute(plan, conn=conn), launched_at, None)
+    return _Started(execute(plan, conn=conn), launched_at, None)
 
 
 def _without(live: dict[str, LiveSession], row: SessionRow) -> dict[str, LiveSession]:
@@ -385,24 +408,28 @@ def _without(live: dict[str, LiveSession], row: SessionRow) -> dict[str, LiveSes
     return {session_id: item for session_id, item in live.items() if session_id != row.session_id}
 
 
-def _answer(web: WebState, row: SessionRow, started: _Started) -> dict[str, object]:
+def _answer(web: WebState, started: _Started) -> dict[str, object]:
     """The answer to a resume once `started` happened: from another machine, wait for the link of
-    a session that was just started."""
-    plan, attach, launched_at, link = started
+    a session that was just started, in the transcript of the session that runs (found under the
+    Claude home by its id; it may be a copy, or new). A new session whose id could not be found
+    has no transcript to wait on: it is pending."""
+    launched, launched_at, link = started
     if launched_at is None:
-        return _resumed(attach, plan, link)
+        return _resumed(launched, link)
     web.live.clear()
+    if launched.session_id is None:
+        return _resumed(launched, None, pending=True)
     if TERMINAL_ALLOWED.get():
-        return _resumed(attach, plan, None)
-    link = wait_for_remote_url(
-        Path(row.transcript_path), launched_at, web.config.resume.remote_link_timeout
-    )
-    return _resumed(attach, plan, link, pending=link is None)
+        return _resumed(launched, None)
+    transcript = functools.partial(find_transcript, web.config.claude_home, launched.session_id)
+    link = wait_for_remote_url(transcript, launched_at, web.config.resume.remote_link_timeout)
+    return _resumed(launched, link, pending=link is None)
 
 
 @actions.post(
     "/sessions/{session_id}/restart-remote",
     response_model=ResumeOut,
+    response_model_exclude_unset=True,
     responses={
         400: {"model": RefusalOut},
         404: {"model": RefusalOut},
@@ -421,7 +448,10 @@ def restart_remote(
     reason says so.
 
     After the stop it is the resume of a session that is not running: from another machine no
-    terminal is opened, and the answer is that of a resume (the link, or `pending`)."""
+    terminal is opened, and the answer is that of a resume (the link, or `pending`). A session
+    that was itself started in the background keeps its own options, so it comes back as a copy
+    under a new id (`copy_of`, `session_id`). A session that can already be joined (restarted
+    from another tab, say) is not stopped: the answer is the resume answer with its link."""
     if confirm != "yes":
         return _refusal(400, "restarting needs confirm=yes")
     web = state(request)
@@ -432,6 +462,10 @@ def restart_remote(
         with session_lock(row.session_id):
             caps, live = web.live.get(fresh=True)
             running = live.get(row.session_id)
+            link = joinable_link(row, live) if running is not None else None
+            if link is not None:
+                attach = shlex.join(attach_argv(row.session_id))
+                return _resumed(Launched(attach, None, row.session_id), link)
             if running is None or running.kind != "background":
                 return _refusal(
                     409,
@@ -450,24 +484,37 @@ def restart_remote(
             except ResumeRefused as refused:
                 reason = f"stopped, but could not start it again: {refused.reason}"
                 return _refusal(409, reason, restartable=False)
-    return _answer(web, row, started)
+    return _answer(web, started)
 
 
-def _resumed(
-    attach: str, plan: ResumePlan, link: str | None, *, pending: bool = False
-) -> dict[str, object]:
-    return {
+def _resumed(launched: Launched, link: str | None, *, pending: bool = False) -> dict[str, object]:
+    """A resume's answer (`ResumeOut`): with `copy_of` only for a copy, and `session_id` too when
+    the copy's full id is known."""
+    answer: dict[str, object] = {
         "ok": True,
-        "attach": attach,
-        "opened_terminal": plan.terminal is not None,
+        "attach": launched.attach,
+        "opened_terminal": launched.terminal is not None,
         "remote_url": link,
         "pending": pending,
+        "at_desk": TERMINAL_ALLOWED.get(),
     }
+    if launched.copy_of is not None:
+        answer["copy_of"] = launched.copy_of
+        if launched.session_id is not None:
+            answer["session_id"] = launched.session_id
+    return answer
+
+
+def at_desk(answer: dict[str, object]) -> dict[str, object]:
+    """A peer's launch answer (`vigil.peers.launch_answer`) with `at_desk` set for this request:
+    the peer's own says only whether the peer's request was at the peer's desk."""
+    return {**answer, "at_desk": TERMINAL_ALLOWED.get()}
 
 
 @actions.post(
     "/peers/{peer}/sessions/{session_id}/resume",
     response_model=ForwardedResumeOut,
+    response_model_exclude_unset=True,
     responses={404: {"model": RefusalOut}, 409: {"model": RefusalOut}, 502: {"model": RefusalOut}},
 )
 def resume_on_peer(
@@ -479,7 +526,7 @@ def resume_on_peer(
     and 409 refusals come back as they are; 502 when it cannot be reached or refuses the
     request."""
     try:
-        return state(request).peers.resume(peer, session_id)
+        return at_desk(state(request).peers.resume(peer, session_id))
     except ResumeForwardError as refused:
         return _refusal(
             refused.status,
@@ -491,6 +538,7 @@ def resume_on_peer(
 @actions.post(
     "/peers/{peer}/sessions/{session_id}/restart-remote",
     response_model=ForwardedResumeOut,
+    response_model_exclude_unset=True,
     responses={
         400: {"model": RefusalOut},
         404: {"model": RefusalOut},
@@ -508,7 +556,7 @@ def restart_on_peer(
     if confirm != "yes":
         return _refusal(400, "restarting needs confirm=yes")
     try:
-        return state(request).peers.restart(peer, session_id)
+        return at_desk(state(request).peers.restart(peer, session_id))
     except ResumeForwardError as refused:
         return _refusal(
             refused.status,

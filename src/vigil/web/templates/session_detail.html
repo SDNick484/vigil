@@ -37,6 +37,50 @@
   {% if not row.last_user and not row.last_assistant %}<p class="muted">Nothing indexed.</p>{% endif %}
 </section>
 
+{% if numbers %}
+<section>
+  <h2>Where the tokens went</h2>
+  <dl>
+    <dt>Turns</dt><dd><span class="tabular-nums">{{ "{:,}".format(numbers.turns|length) }}</span></dd>
+    <dt>Input</dt><dd><span class="tabular-nums">{{ "{:,}".format(numbers.totals.input) }}</span></dd>
+    <dt>Output</dt><dd><span class="tabular-nums">{{ "{:,}".format(numbers.totals.output) }}</span></dd>
+    <dt>Cache written</dt><dd><span class="tabular-nums">{{ "{:,}".format(numbers.totals.cache_write) }}</span></dd>
+    <dt>Cache read</dt><dd><span class="tabular-nums">{{ "{:,}".format(numbers.totals.cache_read) }}</span></dd>
+    <dt>Cache hits</dt><dd><span class="tabular-nums">{{ "{:.0%}".format(numbers.cache_hit_share) }}</span> <span class="muted">of input-side tokens</span></dd>
+    <dt>Compactions</dt><dd><span class="tabular-nums">{{ numbers.compactions }}</span></dd>
+  </dl>
+  {% if numbers.largest_tool_outputs %}
+  <h3>Largest tool outputs</h3>
+  <ol>
+    {% for output in numbers.largest_tool_outputs %}
+    <li>{{ output.tool }} <span class="tabular-nums">{{ "{:,}".format(output.size) }}</span> <span class="muted">characters</span></li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+  {% include "_numbers_detail.html" %}
+</section>
+{% endif %}
+
+{% if reviews is not none %}
+<section id="reviews-section">
+  <h2>Reviews</h2>
+  {% if peer_of(row) %}
+  <p class="muted">{{ machine }} reviews its own sessions: Claude there reads a copy of this session that is not saved and has no tools, and suggests flags, project file changes and habits, within {{ machine }}'s review budget. Acting on a suggestion acts on {{ machine }}.</p>
+  {% else %}
+  <p class="muted">Claude reads a copy of this session that is not saved and has no tools, and suggests flags, project file changes and habits. A review spends up to about ${{ "%.2f"|format(review_budget) }}.</p>
+  {% endif %}
+  <form method="post" action="{{ session_url(row) }}/review"
+        hx-post="{{ session_url(row) }}/review" hx-target="#review-result">
+    <button type="submit">Review this session</button>
+    <span class="result" id="review-result" aria-live="polite"></span>
+  </form>
+  {% if reviews_error %}<p class="result refused">{{ reviews_error }}</p>{% endif %}
+  <div id="reviews">
+    {% for review in reviews %}{% include "_review.html" %}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section>
   <h2>Details</h2>
   <dl>

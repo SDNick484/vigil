@@ -1,0 +1,10 @@
+{# A file suggestion vigil will not apply: why, where the file is, and its text with a Copy
+   button. `card` is a `vigil.web.review.FileCard` with `refused` set. #}
+<div class="copy-only">
+  <p>{{ card.refused }}</p>
+  <p class="muted">File: {{ card.path }}</p>
+  <div class="copy-text">
+    <pre><code>{{ card.copy }}</code></pre>
+    <button type="button" class="copy" data-copy="{{ card.copy }}">Copy</button>
+  </div>
+</div>

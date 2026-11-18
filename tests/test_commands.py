@@ -192,7 +192,7 @@ def test_resume_print_does_not_launch(
     code, out, _ = run(capsys, "resume", NAMED, "--print")
     assert code == 0
     assert f"cd {folder} && claude --bg --resume {NAMED}" in out
-    assert f"claude attach {NAMED}" in out
+    assert f"Attach: claude attach {NAMED[:8]}\n" in out
     # Only capability probes ran: nothing started.
     assert all("--resume" not in call.argv for call in vigil_env.bin.calls("claude"))
     conn = connect(vigil_env.index)
@@ -210,8 +210,7 @@ def test_resume_launches_in_the_folder_and_records_it(
     vigil_env.bin.install("claude", stdout=CLAUDE_BG)
     code, out, _ = run(capsys, "resume", NAMED)
     assert code == 0
-    assert f"claude attach {NAMED}" in out
-    assert "No terminal available" in out
+    assert f"No terminal available. Attach with: claude attach {NAMED[:8]}\n" in out
     started = [c for c in vigil_env.bin.calls("claude") if "--resume" in c.argv]
     assert [(c.argv, c.cwd) for c in started] == [
         (["--bg", "--resume", NAMED, "--remote-control"], str(folder))
@@ -220,6 +219,22 @@ def test_resume_launches_in_the_folder_and_records_it(
     rows = conn.execute("SELECT source, session_id FROM launches").fetchall()
     conn.close()
     assert [tuple(row) for row in rows] == [("vigil", NAMED)]
+
+
+def test_resume_says_when_claude_started_a_copy(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_api import COPY, install_claude
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    install_claude(vigil_env, transcript=tmp_path / "unused.jsonl", link=None, copy_as=COPY)
+    code, out, _ = run(capsys, "resume", NAMED)
+    assert code == 0
+    assert f"claude attach {COPY[:8]}" in out
+    assert f"Started as a copy ({COPY[:8]}): this background session keeps its own options." in out
 
 
 def test_resume_refusal_exit_code_2_and_message(
@@ -240,3 +255,99 @@ def test_resume_without_claude_is_refused(
     code, _, err = run(capsys, "resume", NAMED)
     assert code == 2
     assert "`claude` is not on PATH" in err
+
+
+def test_review_cli_json(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_review_runner import ANSWER, claude_result
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    code, out, _ = run(capsys, "review", NAMED, "--json")
+    assert code == 0
+    data = json.loads(out)
+    assert (data["session_id"], data["status"], data["cost_usd"]) == (NAMED, "done", 0.12)
+    assert [s["kind"] for s in data["suggestions"]] == ["flag", "file", "habit"]
+    runs = [c for c in vigil_env.bin.calls("claude") if "-p" in c.argv]
+    assert [c.cwd for c in runs] == [str(folder)]
+
+
+def test_review_cli_prints_suggestions(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_review_runner import ANSWER, claude_result
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    code, out, _ = run(capsys, "review", NAMED)
+    assert code == 0
+    assert "Plan first" in out
+    assert "The first turns rewrote the same file three times." in out
+    assert f"claude --resume {NAMED} --permission-mode plan" in out
+    assert "Trim tool output" in out
+    assert "Check them before acting." in out
+
+
+def test_review_cli_refused_when_folder_gone(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.test_review_runner import ANSWER, claude_result
+
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    code, out, err = run(capsys, "review", NAMED)
+    assert (code, out) == (2, "")
+    assert err == "vigil: folder no longer exists: /home/user/src/fixture-repo\n"
+
+
+def test_review_cli_failed_exit_1(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout='{"is_error": true, "result": "nope"}', exit_code=1)
+    code, out, err = run(capsys, "review", NAMED)
+    assert code == 1
+    assert "failed" in out
+    assert "nope" in err
+
+
+def test_review_cli_does_not_offer_refused_flags(
+    vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.test_review_runner import claude_result
+
+    def flag(name: str, value: str | None = None) -> dict[str, object]:
+        item: dict[str, object] = {"name": name}
+        if value is not None:
+            item["value"] = value
+        return {"kind": "flag", "title": f"Use {name}", "why": "x", "evidence": "y", "flag": item}
+
+    answer = {
+        "suggestions": [
+            flag("--dangerously-skip-permissions"),
+            flag("--permission-mode", "bypassPermissions"),
+            flag("--mcp-config", "https://example.com/mcp.json"),
+        ],
+        "token_advice": [],
+    }
+    folder = tmp_path / "work"
+    folder.mkdir()
+    run(capsys, "scan")
+    set_cwd(vigil_env, NAMED, folder)
+    vigil_env.bin.install("claude", stdout=claude_result(structured_output=answer))
+    code, out, _ = run(capsys, "review", NAMED)
+    assert code == 0
+    assert "Try:" not in out
+    assert "claude --resume" not in out
+    assert "vigil will not suggest running this flag: flag not allowed: --dangerously-skip" in out
+    assert "vigil will not suggest running this flag: --permission-mode bypassPermissions" in out
+    assert "vigil will not suggest running this flag: flag not allowed: --mcp-config" in out

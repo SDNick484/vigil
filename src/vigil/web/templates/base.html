@@ -22,7 +22,7 @@
     {% block content %}{% endblock %}
   </main>
   <script>
-    // Resume and metadata edits answer with JSON: show the answer in the element the form names
+    // Resume, reviews and metadata edits answer with JSON: show the answer in the element the form names
     // as its hx-target, instead of swapping the JSON in.
     document.body.addEventListener("htmx:beforeSwap", function (event) {
       var xhr = event.detail.xhr;
@@ -44,12 +44,22 @@
         open.href = link;
         open.textContent = "Open in Claude";
         target.className = "result ok";
-        target.append("Opening Claude: ", open);
-        window.location.href = link;
+        if (data.at_desk === true) {
+          // At the desk (a peer's session, say): show the link and the attach command; go nowhere.
+          var attachAt = document.createElement("code");
+          attachAt.textContent = data.attach || "";
+          target.append(open, "; or attach" + (data.machine ? " on " + data.machine : "") + " with: ", attachAt);
+        } else {
+          target.append("Opening Claude: ", open);
+          window.location.href = link;
+        }
       } else if (data.ok === true && data.pending === true) {
         var page = document.createElement("a");
-        page.href = new URL(xhr.responseURL).pathname.replace(/\/(resume|restart-remote)$/, "");
-        page.textContent = "the session page";
+        var path = new URL(xhr.responseURL).pathname;
+        // A review suggestion's resume or new session: its page may not exist yet, so the list.
+        var ofSession = /\/sessions\/[^/]+\/(resume|restart-remote)$/.test(path);
+        page.href = ofSession ? path.replace(/\/(resume|restart-remote)$/, "") : "/";
+        page.textContent = ofSession ? "the session page" : "the sessions list";
         target.className = "result ok";
         target.append("Started; the Remote Control link is not available yet. Try ", page, " in a moment.");
       } else if (data.ok === true && data.attach) {
@@ -58,6 +68,28 @@
         target.className = "result ok";
         var where = data.machine ? " on " + data.machine : "";
         target.append(data.opened_terminal ? "Opened in a terminal" + where + ": " : "Attach" + where + " with: ", code);
+      } else if (typeof data.review_id === "number") {
+        // A review started, or one is already running: show it in the list (it polls itself).
+        // A running review of another session shows only a line saying so.
+        target.className = data.ok === true ? "result ok" : "result refused";
+        target.append(data.ok === true ? "Review started" : (data.reason || "A review is already running"));
+        var list = document.getElementById("reviews");
+        if (list && !document.getElementById("review-" + data.review_id)) {
+          var fragment = new URL(xhr.responseURL).pathname.replace(/\/review$/, "/reviews/" + data.review_id);
+          htmx.ajax("GET", fragment, {target: "#reviews", swap: "afterbegin"});
+        }
+      } else if (data.ok === true && Array.isArray(data.default_flags)) {
+        // "Always use" on a flag suggestion: what resume.default_flags now holds.
+        var flags = document.createElement("code");
+        flags.textContent = data.default_flags.join(" ");
+        target.className = "result ok";
+        target.append(data.machine ? "Saved on " + data.machine + "; every launch there now gets " : "Saved; every launch now gets ", flags);
+      } else if (data.ok === true && typeof data.path === "string") {
+        // Apply on a file suggestion: the file written.
+        var written = document.createElement("code");
+        written.textContent = data.path;
+        target.className = "result ok";
+        target.append(data.machine ? "Written on " + data.machine + ": " : "Written: ", written);
       } else if (data.id) {
         target.className = "result ok";
         target.append("Saved");
@@ -73,6 +105,12 @@
           target.append(" ", restart);
         }
       }
+      // A background session keeps its own options: resumed with flags, Claude Code started a
+      // copy of it under a new id (`session_id`; when that is not known, the job id it attaches to).
+      if (data.ok === true && typeof data.copy_of === "string") {
+        var job = typeof data.session_id === "string" ? data.session_id.slice(0, 8) : (/^claude attach ([0-9a-f]{8})$/.exec(data.attach || "") || [])[1];
+        if (job) target.append(" Started as a copy (" + job + "): this background session keeps its own options.");
+      }
     });
   </script>
   <script>
@@ -84,6 +122,29 @@
       var scope = button.closest("li.session, section");
       var step = scope ? scope.querySelector(".restart-confirm") : null;
       if (step) step.hidden = button.classList.contains("cancel");
+    });
+  </script>
+  <script>
+    // Copy buttons (button.copy): the clipboard needs a secure context, so over plain http from
+    // another machine the command next to the button is selected for copying by hand instead.
+    document.addEventListener("click", function (event) {
+      var button = event.target instanceof Element ? event.target.closest("button.copy") : null;
+      if (!button) return;
+      var code = button.parentElement ? button.parentElement.querySelector("code") : null;
+      function select() {
+        if (!code) return;
+        var range = document.createRange();
+        range.selectNodeContents(code);
+        var selection = window.getSelection();
+        if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+      }
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(button.dataset.copy || "").then(function () {
+          button.textContent = "Copied";
+        }, select);
+      } else {
+        select();
+      }
     });
   </script>
   <script>

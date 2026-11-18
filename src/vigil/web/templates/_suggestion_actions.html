@@ -1,0 +1,48 @@
+{# The actions of one suggestion card, included by `_review.html` with `review`, `suggestion` and
+   `index` (its position) in scope; `catalog` is the installed claude's (`current_catalog`). For a
+   peer's review (`peer_name`) the buttons post to the mirrors (`prefix`), and the flag is checked
+   here without a catalog (the peer checks it against its own claude when asked). The
+   buttons send only the review id and the position: the flag or file change comes from the
+   stored suggestion. A flag `vigil.flags.check` refuses (decided here, at render time) gets the
+   command to copy. A project file suggestion gets Show change, which loads the diff and its
+   Apply form (`_file_change.html`); a user target, or settings with a key vigil does not apply,
+   gets the text to copy (`_file_copy.html`). #}
+{% set base = prefix ~ "/reviews/" ~ review.id ~ "/suggestions/" ~ index %}
+{% set result_id = "suggestion-result-" ~ review.id ~ "-" ~ index %}
+{% if suggestion.kind == "flag" and review.status == "done" %}
+{% set card = flag_card(suggestion, none if peer_name else (catalog or [])) %}
+{% if card.refused is none %}
+<div class="suggestion-actions">
+  <form method="post" action="{{ base }}/resume" hx-post="{{ base }}/resume" hx-target="#{{ result_id }}">
+    <button type="submit">Resume with these</button>
+  </form>
+  <form method="post" action="{{ base }}/start-new" hx-post="{{ base }}/start-new" hx-target="#{{ result_id }}">
+    <button type="submit">Start new session with these</button>
+  </form>
+  <form method="post" action="{{ base }}/always-use" hx-post="{{ base }}/always-use" hx-target="#{{ result_id }}">
+    <button type="submit">Always use</button>
+  </form>
+</div>
+<p class="result" id="{{ result_id }}" aria-live="polite"></p>
+{% else %}
+<div class="copy-only">
+  <p>vigil will not launch this flag itself. Copy the command to try it:</p>
+  <p><code>{{ card.command }}</code>
+    <button type="button" class="copy" data-copy="{{ card.command }}">Copy</button></p>
+  <p class="muted">{{ card.refused }}</p>
+</div>
+{% endif %}
+{% elif suggestion.kind == "file" and review.status == "done" %}
+{% set card = file_card(suggestion, request, peer_name) %}
+{% if card.refused is none %}
+{% set change_id = "suggestion-change-" ~ review.id ~ "-" ~ index %}
+<p class="muted">{{ card.path }}</p>
+<pre>{{ card.copy }}</pre>
+<div class="suggestion-actions">
+  <button type="button" hx-get="{{ base }}/change" hx-target="#{{ change_id }}">Show change</button>
+</div>
+<div class="file-change" id="{{ change_id }}" aria-live="polite"></div>
+{% else %}
+{% include "_file_copy.html" %}
+{% endif %}
+{% endif %}

@@ -1,0 +1,54 @@
+{# One review (`vigil.review.store.Review`), as the session page lists it and as
+   GET /sessions/{id}/reviews/{rid} serves it. While it runs it reloads itself every 2 s.
+   `review_peer` names the peer whose session it is (a `vigil.peers.PeerReview`, whose
+   `indices` are the peer's positions of its suggestions); its links go to the mirrors under
+   /peers/{peer}/. #}
+{% set peer_name = review_peer|default(none) %}
+{% set prefix = "/peers/" ~ peer_name if peer_name else "" %}
+{% set url = prefix ~ "/sessions/" ~ review.session_id|urlencode ~ "/reviews/" ~ review.id %}
+<article class="review" id="review-{{ review.id }}"{% if review.status == "running" %}
+         hx-get="{{ url }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  <h3>Review of {{ review.created_at|when }}
+    <span class="status status-review-{{ review.status }}">{{ review.status }}</span>
+    {% if review.cost_usd is not none %}<span class="muted tabular-nums">${{ "%.2f"|format(review.cost_usd) }}</span>{% endif %}
+  </h3>
+  {% if review.model or review.claude_version %}<p class="muted">{{ review.model or "default model" }}{% if review.claude_version %}, Claude Code {{ review.claude_version }}{% endif %}</p>{% endif %}
+  {% if review.status == "running" %}
+  <p class="muted" aria-live="polite">Claude is reading the session. This can take a few minutes.</p>
+  {% elif review.status == "failed" %}
+  <p class="result refused">{{ review.error or "The review failed." }}</p>
+  {% else %}
+  {% if review.error %}<p class="muted">Note: {{ review.error }}</p>{% endif %}
+  <p class="note">Suggestions come from Claude reading this session. Check them before acting.</p>
+  {% for suggestion in review.suggestions %}
+  {% set index = review.indices[loop.index0] if review.indices is defined else loop.index0 %}
+  <div class="suggestion" id="suggestion-{{ review.id }}-{{ index }}">
+    <h4>{{ suggestion.title }} <span class="badge">{{ suggestion.kind }}</span></h4>
+    <p>{{ suggestion.why }}</p>
+    {% if suggestion.evidence %}<p class="muted">Evidence: {{ suggestion.evidence }}</p>{% endif %}
+    {% if suggestion.kind == "flag" %}
+    <p><code>{{ suggestion.flag_name }}{% if suggestion.flag_value %} {{ suggestion.flag_value }}{% endif %}</code></p>
+    {% endif %}
+    {# Per-card actions, keyed by (review.id, index): `_suggestion_actions.html` gets `review`,
+       `suggestion`, `index`, `catalog`, `peer_name` and `prefix`. It also shows a file
+       suggestion's text. #}
+    {% include "_suggestion_actions.html" %}
+  </div>
+  {% else %}
+  <p class="muted">No suggestions.</p>
+  {% endfor %}
+  {% if review.advice %}
+  <h4>Token advice</h4>
+  <ul>
+    {% for point in review.advice %}<li><strong>{{ point.title }}</strong>: {{ point.why }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+  {% set numbers = review.numbers %}
+  {% if numbers %}
+  <details>
+    <summary>Numbers the review was given</summary>
+    {% include "_numbers_detail.html" %}
+  </details>
+  {% endif %}
+</article>
