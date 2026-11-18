@@ -28,10 +28,11 @@ from tests.conftest import (
     FIXTURE_TRANSCRIPTS,
     HANDMADE_PROJECT_DIR,
     LOOPBACK_URL,
+    SKIP_REMOTE_FIXTURE,
     VigilEnv,
 )
 from vigil import peers
-from vigil.config import Config, ConfigError, Peer, ServerConfig, load_config
+from vigil.config import Config, ConfigError, Peer, ResumeConfig, ServerConfig, load_config
 from vigil.index.db import connect
 from vigil.index.queries import list_sessions, set_meta
 from vigil.index.scanner import scan
@@ -168,7 +169,11 @@ def machines(vigil_env: VigilEnv, tmp_path: Path) -> Iterator[Machines]:
 
     # peer-b: its own Claude home, index and token; remote access on.
     home_b = tmp_path / "peer_b_home"
-    shutil.copytree(FIXTURE_TRANSCRIPTS / "handmade", home_b / "projects" / HANDMADE_PROJECT_DIR)
+    shutil.copytree(
+        FIXTURE_TRANSCRIPTS / "handmade",
+        home_b / "projects" / HANDMADE_PROJECT_DIR,
+        ignore=SKIP_REMOTE_FIXTURE,
+    )
     index_b = tmp_path / "peer_b" / "index.db"
     cwd_b = tmp_path / "peer_b_work"
     cwd_b.mkdir()
@@ -180,6 +185,7 @@ def machines(vigil_env: VigilEnv, tmp_path: Path) -> Iterator[Machines]:
     token_b_server = write_token(tmp_path / "peer_b_server_token", TOKEN_B)
     config_b = Config(
         claude_home=home_b,
+        resume=ResumeConfig(remote_link_timeout=0.1),
         server=ServerConfig(token_file=token_b_server, allowed_hosts=(PEER_B_HOST,)),
     )
     app_b = create_app(config_b, conn_factory=lambda: connect(index_b), start_watcher=False)
@@ -436,12 +442,14 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
         "ok": True,
         "attach": f"claude attach {HANDMADE}",
         "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,  # a link did not turn up within the (short) test wait
         "machine": "peer-b",
     }
     # peer-b started it, in its own folder for the session; nothing opened a terminal.
     started = [call for call in env.bin.calls("claude") if "--resume" in call.argv]
     assert len(started) == 1
-    assert started[0].argv[:3] == ["--bg", "--resume", HANDMADE]
+    assert started[0].argv == ["--bg", "--resume", HANDMADE, "--remote-control"]
     assert started[0].cwd == str(machines.peer_b_cwd)
     assert env.bin.calls("xterm") == []
     # The forwarded request: peer-b's token, no Origin (a bearer request needs none).
@@ -468,6 +476,7 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
     assert response.json() == {
         "ok": False,
         "reason": "peer-b: folder no longer exists: /nonexistent/gone",
+        "restartable": False,
     }
     response = laptop.post(f"/peers/peer-b/sessions/{C_SESSION}/resume")
     assert response.status_code == 404 and response.json()["reason"].startswith("peer-b: ")
@@ -495,6 +504,103 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
     response = laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/resume")
     assert response.status_code == 502
     assert response.json()["reason"] == "peer-b: unreachable: connection refused"
+
+
+def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    answer: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(answer.pop("status", 200), json=answer)
+
+    network = Network(hosts={PEER_B_HOST: handle})
+    answer.update(ok=True, attach="claude attach x", opened_terminal=False, remote_url=link)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded == {
+        "ok": True,
+        "attach": "claude attach x",
+        "opened_terminal": False,
+        "remote_url": link,
+        "pending": False,
+        "machine": "peer-b",
+    }
+    # A link that is not a Claude link is dropped: it ends up in the user's browser.
+    answer.update(ok=True, attach="claude attach x", remote_url="https://evil.example/x")
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded["remote_url"] is None
+    answer.update(ok=True, attach="claude attach x", remote_url=None, pending=True)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded["pending"] is True
+    # A refusal that offers a restart says so.
+    answer.update(status=409, ok=False, reason="running without Remote Control", restartable=True)
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert (refused.value.status, refused.value.restartable) == (409, True)
+    assert refused.value.reason == "peer-b: running without Remote Control"
+    answer.update(status=409, ok=False, reason="folder gone")
+    answer.pop("restartable")
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert refused.value.restartable is False
+
+
+def test_forward_restart(tmp_path: Path) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    seen: list[httpx.Request] = []
+    answer: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(answer.pop("status", 200), json=answer)
+
+    network = Network(hosts={PEER_B_HOST: handle})
+    answer.update(ok=True, attach="claude attach x", opened_terminal=False, remote_url=link)
+    forwarded = peers.forward_restart(peer, HANDMADE, transport=network.transport())
+    assert forwarded == {
+        "ok": True,
+        "attach": "claude attach x",
+        "opened_terminal": False,
+        "remote_url": link,
+        "pending": False,
+        "machine": "peer-b",
+    }
+    (request,) = seen
+    assert request.method == "POST"
+    assert request.url.path == f"/sessions/{HANDMADE}/restart-remote"
+    assert request.read() == b"confirm=yes"  # the peer insists on the confirmation
+    assert request.headers["authorization"] == f"Bearer {TOKEN_B}"
+    # Same handling of the answer as a resume: foreign links dropped, refusals carried over.
+    answer.update(ok=True, attach="claude attach x", remote_url="https://evil.example/x")
+    forwarded = peers.forward_restart(peer, HANDMADE, transport=network.transport())
+    assert forwarded["remote_url"] is None
+    answer.update(status=409, ok=False, reason="could not stop the session", restartable=False)
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_restart(peer, HANDMADE, transport=network.transport())
+    assert refused.value.status == 409
+    assert refused.value.reason == "peer-b: could not stop the session"
+    with pytest.raises(peers.ResumeForwardError) as refused:
+        peers.forward_restart(peer, "-rf", transport=network.transport())
+    assert refused.value.status == 404
+    assert len(seen) == 3  # a bad session id sends nothing
+
+
+CONFIRM = {"confirm": "yes"}
+
+
+def test_restart_forwarded_to_owner(machines: Machines) -> None:
+    laptop, network = machines.laptop, machines.network
+    # Without the confirmation nothing is sent to the peer.
+    assert laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/restart-remote").status_code == 400
+    assert network.requests == []
+    response = laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/restart-remote", data=CONFIRM)
+    # peer-b answers for itself: it knows no such live session, so it refuses the restart.
+    assert response.status_code == 409, response.text
+    assert response.json()["reason"].startswith("peer-b: ")
+    assert response.json()["restartable"] is False
+    assert any(r.url.path == f"/sessions/{HANDMADE}/restart-remote" for r in network.requests)
+    assert laptop.post("/peers/nobody/sessions/x/restart-remote", data=CONFIRM).status_code == 404
 
 
 def test_resume_forward_refused_by_peer(machines: Machines, tmp_path: Path) -> None:
@@ -698,3 +804,92 @@ def test_bad_peers_config_raises(tmp_path: Path, text: str, message: str) -> Non
 def test_create_app_without_peers_has_an_empty_hub(vigil_env: VigilEnv) -> None:
     app: FastAPI = create_app(Config(claude_home=vigil_env.claude_home), start_watcher=False)
     assert app.state.vigil.peers.peers == ()
+
+
+def test_peer_remote_url_validated() -> None:
+    good = "https://claude.ai/code/session_PLACEHOLDER01"
+    at = "2026-11-17T11:05:00.000000+00:00"
+    session = session_from_dict(canned_session(remote_url=good, remote_url_at=at), "peer-c")
+    assert session is not None
+    assert session.remote_url == good and session.remote_url_at is not None
+    for bad in ("https://evil.example/x", good + "/../x", good + "?a=1", 7, None):
+        session = session_from_dict(canned_session(remote_url=bad, remote_url_at=at), "peer-c")
+        assert session is not None and session.remote_url is None
+
+
+def test_peer_open_url_validated() -> None:
+    good = "https://claude.ai/code/session_PLACEHOLDER01"
+    session = session_from_dict(canned_session(open_url=good), "peer-c")
+    assert session is not None and session.open_url == good
+    assert session_to_dict(session)["open_url"] == good
+    for bad in ("https://evil.example/x", good + "?a=1", 7, None):
+        session = session_from_dict(canned_session(open_url=bad), "peer-c")
+        assert session is not None and session.open_url is None
+    session = session_from_dict(canned_session(), "peer-c")
+    assert session is not None and session.open_url is None
+
+
+def test_peer_row_shows_open_only_from_open_url(machines: Machines) -> None:
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+    answer = canned_session(status="background", remote_url=link, open_url=None)
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[answer])
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    row_id = f"peer-peer-c-{C_SESSION}"
+    # A link and a live session, but the owner did not say it is joinable: no guess.
+    machines.hub.forget("peer-c")
+    page = machines.laptop.get("/").text
+    assert 'class="open"' not in row_html(page, row_id)
+    assert link not in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text
+    # The owner says it is.
+    answer["open_url"] = link
+    machines.hub.forget("peer-c")
+    page = machines.laptop.get("/").text
+    assert f'<a class="open" href="{link}" rel="noopener">Open in Claude</a>' in row_html(
+        page, row_id
+    )
+    machines.hub.forget("peer-c")
+    assert link in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text
+
+
+def test_peer_busy_is_read_as_a_bool() -> None:
+    for value, expected in (
+        (True, True),
+        (False, False),
+        ("yes", False),
+        (1, False),
+        (None, False),
+    ):
+        session = session_from_dict(canned_session(busy=value), "peer-c")
+        assert session is not None and session.busy is expected
+    session = session_from_dict(canned_session(), "peer-c")
+    assert session is not None and session.busy is False
+    # What a stale peer last sent says nothing about now.
+    session = session_from_dict(canned_session(busy=True), "peer-c", stale=True)
+    assert session is not None and session.busy is False
+    assert session_from_dict(canned_session(busy=True), "peer-c") is not None
+    busy = session_from_dict(canned_session(busy=True), "peer-c")
+    assert busy is not None and session_to_dict(busy)["busy"] is True
+
+
+def test_peer_row_shows_the_busy_warning_from_the_owner(machines: Machines) -> None:
+    answer = canned_session(status="background", busy=True)
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[answer])
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    row_id = f"peer-peer-c-{C_SESSION}"
+    busy_copy = "This session is working right now. Restarting stops it mid-task."
+    machines.hub.forget("peer-c")
+    page = machines.laptop.get("/").text
+    row = row_html(page, row_id)
+    assert f'action="/peers/peer-c/sessions/{C_SESSION}/restart-remote"' in row
+    assert busy_copy in row
+    machines.hub.forget("peer-c")
+    assert busy_copy in machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}").text
+    answer["busy"] = False
+    machines.hub.forget("peer-c")
+    assert busy_copy not in row_html(machines.laptop.get("/").text, row_id)

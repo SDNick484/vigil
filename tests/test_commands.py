@@ -111,6 +111,7 @@ def test_ls_json_shape(vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str]) 
         "git_branch", "version", "first_prompt", "last_user", "last_assistant", "started_at",
         "last_activity_at", "message_count", "models", "previous_id", "chain_id", "machine",
         "project_key", "project_label", "transcript_path", "status",
+        "remote_url", "remote_url_at", "open_url", "busy",
     }  # fmt: skip
     assert named["short_id"] == NAMED[:8]
     assert named["name"] == named["title"] == "fixture-named"
@@ -212,7 +213,9 @@ def test_resume_launches_in_the_folder_and_records_it(
     assert f"claude attach {NAMED}" in out
     assert "No terminal available" in out
     started = [c for c in vigil_env.bin.calls("claude") if "--resume" in c.argv]
-    assert [(c.argv, c.cwd) for c in started] == [(["--bg", "--resume", NAMED], str(folder))]
+    assert [(c.argv, c.cwd) for c in started] == [
+        (["--bg", "--resume", NAMED, "--remote-control"], str(folder))
+    ]
     conn = connect(vigil_env.index)
     rows = conn.execute("SELECT source, session_id FROM launches").fetchall()
     conn.close()

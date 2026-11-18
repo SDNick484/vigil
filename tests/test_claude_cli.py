@@ -3,13 +3,20 @@
 import json
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import FakeBin
 from vigil import claude_cli
-from vigil.claude_cli import Capabilities, LiveSession, capabilities, live_sessions
+from vigil.claude_cli import (
+    Capabilities,
+    LiveSession,
+    capabilities,
+    live_sessions,
+    live_sessions_or_none,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_help"
 NO_CAPS = Capabilities(version=None, has_bg=False, has_attach=False, has_agents_json=False)
@@ -104,6 +111,8 @@ def test_live_sessions_parses_json(fake_bin: FakeBin) -> None:
             "interactive",
             "demo-session",
             "/home/user/projects/demo",
+            busy=True,
+            started_at=datetime(2026, 11, 17, 15, 7, 5, 568000, tzinfo=UTC),
         ),
         "bg-1": LiveSession("bg-1", "background", None, "/home/user/work"),
     }
@@ -132,3 +141,46 @@ def test_live_sessions_handles_timeout(fake_bin: FakeBin, monkeypatch: pytest.Mo
     script.chmod(0o755)
     monkeypatch.setattr(claude_cli, "_LIVE_TIMEOUT", 0.3)
     assert live_sessions(ALL_CAPS) == {}
+
+
+def test_live_session_busy_and_started(fake_bin: FakeBin) -> None:
+    entries = [
+        {
+            "pid": 1,
+            "cwd": "/home/user/work",
+            "kind": "interactive",
+            "startedAt": 1794938034841,
+            "sessionId": "busy-1",
+            "name": "x",
+            "status": "busy",
+        },
+        {"kind": "interactive", "sessionId": "idle-1", "status": "idle", "startedAt": "soon"},
+    ]
+    install_claude(fake_bin, version="2.1.312\n", help_text="", agents_json=json.dumps(entries))
+    live = live_sessions(ALL_CAPS)
+    assert live["busy-1"].busy is True
+    assert live["busy-1"].started_at == datetime.fromtimestamp(1794938034.841, tz=UTC)
+    assert live["busy-1"].started_at == datetime(2026, 11, 17, 17, 53, 54, 841000, tzinfo=UTC)
+    assert live["idle-1"].busy is False
+    assert live["idle-1"].started_at is None
+
+
+@pytest.mark.parametrize("output", ["", "not json", "{}", '"x"', "[{"])
+def test_live_sessions_or_none_says_unknown_for_garbage(fake_bin: FakeBin, output: str) -> None:
+    install_claude(fake_bin, version="2.1.312\n", help_text="", agents_json=output)
+    assert live_sessions_or_none(ALL_CAPS) is None
+
+
+def test_live_sessions_or_none_says_unknown_for_failure_and_missing_support(
+    fake_bin: FakeBin,
+) -> None:
+    fake_bin.install("claude", stdout='[{"sessionId": "x"}]', exit_code=1)
+    assert live_sessions_or_none(ALL_CAPS) is None
+    assert live_sessions_or_none(NO_CAPS) is None
+
+
+def test_live_sessions_or_none_lists_nothing_as_empty(fake_bin: FakeBin) -> None:
+    install_claude(fake_bin, version="2.1.312\n", help_text="", agents_json="[]")
+    assert live_sessions_or_none(ALL_CAPS) == {}
+    install_claude(fake_bin, version="2.1.312\n", help_text="", agents_json='[{"sessionId": "x"}]')
+    assert set(live_sessions_or_none(ALL_CAPS) or {}) == {"x"}

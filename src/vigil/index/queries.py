@@ -45,6 +45,14 @@ class SessionRow:
     note: str | None = None
     models: tuple[str, ...] = ()
     status: Status = "unknown"
+    remote_url: str | None = None
+    remote_url_at: datetime | None = None
+    open_url: str | None = None
+    """The link to join the session by right now (`vigil.serialize.open_link`), set along with
+    `status` by `apply_status`; None when it is not live or has no current link."""
+    busy: bool = False
+    """The live session is working right now (`LiveSession.busy`), set by `apply_status`; False
+    when it is not live or the live sessions are not known."""
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,8 @@ def _row(row: sqlite3.Row) -> SessionRow:
         archived=bool(row["archived"]),
         note=row["note"],
         models=tuple(sorted(models.split(_SEP))) if models else (),
+        remote_url=row["remote_url"],
+        remote_url_at=from_db(row["remote_url_at"]),
     )
 
 

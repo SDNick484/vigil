@@ -1,0 +1,13 @@
+{# The second step of Restart with Remote Control, opened by the button the resume answer offers
+   for a background session without a link. Needs `s` (the session) and `busy` (row keys of the
+   working ones). #}
+<div class="restart-confirm" hidden>
+  <p>Restarting stops this session and interrupts anything it is doing.</p>
+  {% if row_key(s) in busy %}<p class="busy">This session is working right now. Restarting stops it mid-task.</p>{% endif %}
+  <form method="post" action="{{ restart_url(s) }}"
+        hx-post="{{ restart_url(s) }}" hx-target="#{{ result_id }}">
+    <input type="hidden" name="confirm" value="yes">
+    <button type="submit">Restart</button>
+    <button type="button" class="cancel">Cancel</button>
+  </form>
+</div>

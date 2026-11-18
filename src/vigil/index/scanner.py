@@ -188,6 +188,8 @@ def _load_facts(conn: sqlite3.Connection, session_id: str) -> SessionFacts | Non
         models=models,
         features=features,
         previous_session_id=row["previous_session_id"],
+        remote_url=row["remote_url"],
+        remote_url_at=from_db(row["remote_url_at"]),
     )
 
 
@@ -208,8 +210,9 @@ def _store_facts(conn: sqlite3.Connection, facts: SessionFacts, key: str, machin
         INSERT INTO sessions (
             session_id, cwd, git_branch, version, title, first_prompt, last_user,
             last_assistant, started_at, last_activity_at, message_count, previous_session_id,
-            machine, project_key, project_label, chain_id, transcript_path
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            machine, project_key, project_label, chain_id, transcript_path, remote_url,
+            remote_url_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (session_id) DO UPDATE SET
             cwd = excluded.cwd, git_branch = excluded.git_branch, version = excluded.version,
             title = excluded.title, first_prompt = excluded.first_prompt,
@@ -218,7 +221,8 @@ def _store_facts(conn: sqlite3.Connection, facts: SessionFacts, key: str, machin
             message_count = excluded.message_count,
             previous_session_id = excluded.previous_session_id, machine = excluded.machine,
             project_key = excluded.project_key, project_label = excluded.project_label,
-            chain_id = excluded.chain_id, transcript_path = excluded.transcript_path
+            chain_id = excluded.chain_id, transcript_path = excluded.transcript_path,
+            remote_url = excluded.remote_url, remote_url_at = excluded.remote_url_at
         """,
         (
             sid,
@@ -238,6 +242,8 @@ def _store_facts(conn: sqlite3.Connection, facts: SessionFacts, key: str, machin
             project_label,
             chain_id,
             key,
+            facts.remote_url,
+            to_db(facts.remote_url_at),
         ),
     )
     conn.execute("DELETE FROM session_models WHERE session_id = ?", (sid,))
