@@ -118,6 +118,15 @@ def test_post_review_409_when_busy(
     assert [c for c in vigil_env.bin.calls("claude") if "-p" in c.argv] == []
 
 
+def test_second_press_shows_the_running_review(web_client: TestClient) -> None:
+    """A 409 with `review_id` (one already runs) loads that review's fragment into the list,
+    as a review the press started does."""
+    page = web_client.get(f"/sessions/{NAMED}").text
+    script = page.split('typeof data.review_id === "number"')[1].split("} else if")[0]
+    assert 'if (list && !document.getElementById("review-" + data.review_id))' in script
+    assert 'htmx.ajax("GET", fragment, {target: "#reviews", swap: "afterbegin"})' in script
+
+
 def test_post_review_409_when_another_process_runs_one(
     vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
 ) -> None:
@@ -197,14 +206,22 @@ def test_review_fragment_stops_polling_when_gone(
     review_id = insert(conn)
     conn.close()
     other = "f26f1b2c-d3b2-4389-b0ed-aba7e19e8594"
-    for url in (
-        f"/sessions/{NAMED}/reviews/{review_id + 1}",
-        f"/sessions/{other}/reviews/{review_id}",
-    ):
-        gone = web_client.get(url)
-        assert gone.status_code == 286  # htmx stops polling
-        assert "This review is no longer available." in gone.text
-        assert "hx-trigger" not in gone.text
+    gone = web_client.get(f"/sessions/{NAMED}/reviews/{review_id + 1}")
+    assert gone.status_code == 286  # htmx stops polling
+    assert "This review is no longer available." in gone.text
+    assert "hx-trigger" not in gone.text
+    # Another session's review is not shown; while it runs (a second press on this session's
+    # page loads the running one) the line says that is why this session's cannot start.
+    busy = web_client.get(f"/sessions/{other}/reviews/{review_id}")
+    assert busy.status_code == 286
+    assert "A review of another session is running" in busy.text
+    assert "hx-trigger" not in busy.text
+    conn = connect(vigil_env.index)
+    finish(conn, review_id, suggestions=[], advice=[], cost_usd=0.2)
+    conn.close()
+    gone = web_client.get(f"/sessions/{other}/reviews/{review_id}")
+    assert gone.status_code == 286
+    assert "This review is no longer available." in gone.text
     # The review's session leaves the index while the page polls it.
     conn = connect(vigil_env.index)
     with conn:

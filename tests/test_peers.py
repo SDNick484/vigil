@@ -1050,6 +1050,20 @@ def test_forward_review_poll_renders_local_links(machines: Machines) -> None:
         assert "This review is no longer available." in response.text
 
 
+def test_second_press_on_a_peer_shows_its_running_review(machines: Machines) -> None:
+    """The peer's 409 keeps the running review's id, and its fragment says whose it is."""
+    machines.env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    review_id = peer_b_review(machines, done=False)
+    response = machines.laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/review")
+    assert response.status_code == 409, response.text
+    assert response.json()["review_id"] == review_id
+    fragment = machines.laptop.get(f"/peers/peer-b/sessions/{HANDMADE}/reviews/{review_id}")
+    assert fragment.status_code == 200 and 'hx-trigger="every 2s"' in fragment.text
+    other = machines.laptop.get(f"/peers/peer-b/sessions/{C_SESSION}/reviews/{review_id}")
+    assert other.status_code == 286
+    assert "A review of another session is running" in other.text
+
+
 def test_peer_review_is_cleaned(machines: Machines) -> None:
     """What a peer sends about a review is checked here again before it is shown."""
     review = {

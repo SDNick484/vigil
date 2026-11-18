@@ -85,7 +85,7 @@ from vigil.review.runner import (
     complete_review,
 )
 from vigil.review.schema import Kind, Suggestion, clean
-from vigil.review.store import get_review, list_reviews, review_to_dict
+from vigil.review.store import Review, get_review, list_reviews, review_to_dict
 from vigil.web import WebState, connection, state
 from vigil.web.api import (
     ForwardedResumeOut,
@@ -360,15 +360,27 @@ def start_review(request: Request, session_id: str) -> dict[str, object] | JSONR
 def review_fragment(request: Request, session_id: str, review_id: int) -> Any:
     """One review of a session as an HTML fragment (`_review.html`), for the session page. While
     the review runs, the fragment reloads itself every 2 s. A review that is gone (or not this
-    session's) answers 286, which makes htmx stop polling, with a line saying so."""
+    session's) answers 286, which makes htmx stop polling, with a line saying so: when it is
+    another session's review that is running (the page asks for it after a second press found
+    one running), that it is."""
     with connection(request) as conn:
         review = get_review(conn, review_id)
         catalog = current_catalog(conn)
-    if review is None or review.session_id != session_id:
+    if review is None:
         return _gone(review_id)
+    if review.session_id != session_id:
+        return _not_this_sessions(review)
     return templates.TemplateResponse(
         request, "_review.html", {"review": review, "catalog": catalog, "review_peer": None}
     )
+
+
+def _not_this_sessions(review: Review) -> HTMLResponse:
+    """The fragment for `review` asked for under another session: nothing of it is shown."""
+    if review.status == "running":
+        why = "A review of another session is running; try again when it has finished."
+        return _gone(review.id, why)
+    return _gone(review.id)
 
 
 def _gone(review_id: int, why: str = "This review is no longer available.") -> HTMLResponse:
@@ -746,7 +758,7 @@ def peer_review_fragment(request: Request, peer: str, session_id: str, review_id
     if found is None:
         return _gone(review_id, f"{peer}: answered something that is not a review.")
     if found.session_id != session_id:
-        return _gone(review_id)
+        return _not_this_sessions(found)
     context = {"review": found, "catalog": None, "review_peer": peer}
     return templates.TemplateResponse(request, "_review.html", context)
 
