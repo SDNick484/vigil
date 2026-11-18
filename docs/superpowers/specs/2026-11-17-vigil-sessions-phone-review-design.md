@@ -56,7 +56,7 @@ The three parts ship in this order, one issue and PR each (part 3 may split furt
 | Resume may only run `claude` (or `tmux`) against a session ID present in the index. | Also: start a **new** session, only in a folder that is the cwd of an indexed session (part 3); run `claude -p` to review an indexed session (part 3). |
 | Extra flags are only those in `resume.default_flags`, allow-listed to five flags. | One allow-list in code (below) governs default flags, "Resume with these" and "Start new session with these". Per-flag value rules apply. |
 | (none) | vigil may write exactly two files, `CLAUDE.md` and `.claude/settings.json`, inside a project folder, and only on a confirmed Apply (part 3). |
-| (none; vigil never stops a session) | vigil may stop a background session with `claude stop <id>`, only to restart it with Remote Control, and only after the author confirms a warning that this interrupts it (part 2). |
+| (none; vigil never stops a session) | vigil may stop a background session with `claude stop <job id>`, only to restart it with Remote Control, and only after the author confirms a warning that this interrupts it (part 2). |
 | Peers forward only Resume. | Peers also forward Review, Start new session, Always use, Show change and Apply (part 3), and Restart with Remote Control (part 2). The peer token now authorizes these writes on the peer. |
 | v1 non-goal: no LLM-generated summaries. | Superseded for reviews only, which are on demand. The index still holds no LLM text unless a review was run. |
 
@@ -77,11 +77,21 @@ The Claude home rule and the 500-character limit on indexed transcript text stay
   `--effort`.
 - `--permission-mode` choices: `acceptEdits`, `auto`, `bypassPermissions`, `manual`,
   `dontAsk`, `plan`.
+- Found on a real machine after building: `claude attach`, `claude stop` and `claude logs` take
+  the 8-character job id (the first 8 characters of the session id); given a full session id
+  they print `No job matching '<id>'. Run 'claude agents' to list running sessions.` and exit 1.
+- `claude --bg` prints `backgrounded · <job id> (idle — …)` once it has started a session. It
+  ignores `--session-id` (with a warning on stderr) and picks the new session's id itself.
+- `claude --bg --resume <id>` with flags, for a session that was itself started with `--bg`,
+  starts a copy under a new id ("keeps its own saved options, so the flags you passed started a
+  copy as …"); the copy has its own transcript (where the `bridge_status` link goes), and the
+  original stays stopped. For a session that was never a background session it continues the
+  same id.
 
 ## Part 1: the sessions page
 
-Mockup the author approved: https://claude.ai/artifact/1xtxFh8mYe9D4FwMbDsYxL (private to the
-author; the description here is complete without it).
+The author approved a mockup (private to the author); the description here is complete without
+it.
 
 - **Summary line** at the top: counts of running, background and idle sessions, and the number
   of projects. Counts follow the current search and filters.
@@ -122,7 +132,15 @@ author; the description here is complete without it).
   phone the OS hands it to the Claude app if installed. Nothing runs on the machine.
 - **Session is not live**: Resume from a remote request (the existing "no terminal for remote
   resume" path) runs `claude --bg --resume <id> --remote-control [other default flags]`, adding
-  `--remote-control` even if it is not in `resume.default_flags`. It then waits up to 30 s
+  `--remote-control` even if it is not in `resume.default_flags`. vigil reads which session
+  started from what `claude --bg` prints (`backgrounded · <job id>`) and `claude agents --json`
+  (the session whose id starts with that job id, in the same folder); it may be a copy (see the
+  facts above), and then the answer says so (`copy_of`, `session_id`) and the page says
+  "Started as a copy (<job id>): this background session keeps its own options." When it
+  printed another job id but that session cannot be found (not listed yet, listed in another
+  folder), vigil attaches by that job id, leaves `session_id` out and answers pending (it has no
+  transcript to wait on). Only when it printed no job id, or the requested session's, does it
+  carry on with the id it asked for. It then waits up to 30 s
   (my call; configurable `resume.remote_link_timeout`) for a new `bridge_status` record with a
   timestamp after the launch, reading the transcript directly rather than waiting for the
   watcher. On success the response carries the URL and the page navigates to it. On timeout it
@@ -134,12 +152,14 @@ author; the description here is complete without it).
 - **Session is running in the background (`--bg`) without a link** (decided with the author:
   offer both): the answer explains the session has no Remote Control link and offers two
   choices:
-  - the hint: attach at a desk (`claude attach <id>`, shown) and type `/remote-control`;
+  - the hint: attach at a desk (`claude attach <job id>`, shown) and type `/remote-control`;
   - **Restart with Remote Control**: an in-page confirm step warns that this stops the session
     and interrupts anything it is doing. When the live status says the session is busy, the
-    warning says so plainly. On confirm, vigil runs `claude stop <id>`, waits for the session
-    to leave `claude agents --json` (up to 10 s, my call), then resumes it as in the not-live
-    case and waits for the link. If the stop does not take, it refuses and starts nothing.
+    warning says so plainly. On confirm, vigil runs `claude stop <job id>`, waits for the
+    session to leave `claude agents --json` (up to 10 s, my call), then resumes it as in the
+    not-live case and waits for the link. If the stop does not take, it refuses and starts
+    nothing. Such a session was started in the background, so it comes back as a copy under a
+    new id, and the answer says so.
 - vigil adds `--remote-control` to every background session it starts (resume and start-new,
   desk or phone), so the case above only comes up for sessions started outside vigil (my call).
 - **At the desk** (loopback request): Resume behaves as today and opens a terminal. If the
@@ -184,8 +204,8 @@ vigil runs, with cwd set to the session's cwd:
 
 ```
 claude -p --resume <id> --fork-session --no-session-persistence --tools "" \
-  --output-format json --json-schema <schema> --max-budget-usd <review.max_budget_usd> \
-  [--model <review.model>] "<review prompt>"
+  --strict-mcp-config --output-format json --json-schema <schema> \
+  --max-budget-usd <review.max_budget_usd> [--model <review.model>] "<review prompt>"
 ```
 
 - The review prompt includes the step 1 numbers, the catalog of the installed version (flags
@@ -193,9 +213,13 @@ claude -p --resume <id> --fork-session --no-session-persistence --tools "" \
   for suggestions tied to evidence in this session, ranked by expected benefit, at most ten.
 - The fork is not persisted and has no tools, so the reviewed session is untouched and nothing
   new appears in the index. The builder verifies this on the installed version (see "Left to
-  the builder").
-- Config: `[review]` with `max_budget_usd` (default 1.00, my call) and `model` (default unset:
-  Claude Code's default).
+  the builder"). `--strict-mcp-config` with no `--mcp-config` loads no MCP server: without it
+  a project's `.mcp.json` servers were started for the review (found on a real machine;
+  approved by the author).
+- Config: `[review]` with `max_budget_usd` (default 3.00) and `model` (default `sonnet`), decided
+  with the author after a real run: one Opus turn on a small session cost $1.07 at list price,
+  mostly Claude Code's own system prompt, and the budget is only checked after a turn, so an
+  answer that arrives over budget is kept with a note.
 - Output schema, one list `suggestions`, each item:
   - `kind`: `flag` | `file` | `habit`
   - `title` (≤ 80 chars), `why` (≤ 500 chars), `evidence` (≤ 500 chars: turn number or short
@@ -220,10 +244,14 @@ Each suggestion is a card: title, why, evidence, and buttons that depend on its 
 **`flag`**: if the flag and value pass the allow-list:
 
 - **Resume with these**: Resume as today, with the suggested flags added for this launch only.
-- **Start new session with these**: `claude --bg --session-id <new uuid> [flags]` in the
-  session's cwd (tmux fallback as for Resume). At the desk it opens a terminal attached to it.
-  From a phone it adds `--remote-control` and waits for the link as in part 2, finding the
-  transcript through the `--session-id` vigil chose.
+- **Start new session with these**: `claude --bg [flags]` in the session's cwd (tmux fallback
+  as for Resume, where `claude --session-id <new uuid> [flags]` runs under an id vigil
+  chooses). `claude --bg` ignores `--session-id` and picks the id itself; vigil finds it as for
+  Resume (part 2), from its output and `claude agents --json`. At the desk it opens a terminal
+  attached to it. From a phone it adds `--remote-control` and waits for the link as in part 2,
+  finding the transcript by that id. If only its job id is known, it attaches by that and the
+  answer is pending; if `claude --bg` printed no job id, the answer says the session started and
+  its link is not available yet, with no terminal and no link.
 - **Always use**: adds the flag to `resume.default_flags` in vigil's own config file, keeping
   the rest of the file as written (comments included). This is the only write to vigil's config
   from the web.
@@ -286,7 +314,7 @@ suggestions come from Claude reading the session and should be checked.
 - Remote link wait: 30 s, configurable. Stop wait for Restart with Remote Control: 10 s.
 - vigil adds `--remote-control` to every background session it starts.
 - A review's launch flags come only from launches vigil made itself.
-- One review at a time per machine. Review budget defaults to $1.00.
+- One review at a time per machine.
 - Review runs on a non-persisted fork of the session (the full conversation) rather than on a
   digest vigil builds. This costs more tokens on long sessions but lets Claude see what
   happened. If cost turns out to matter, a digest mode can come later.
@@ -301,9 +329,15 @@ suggestions come from Claude reading the session and should be checked.
   `--no-session-persistence` + `-p` leaves no new transcript under the Claude home and does not
   touch the reviewed session's file. Also check whether `--bare` still authenticates with a
   subscription login; if it does, add it (skips hooks and plugins during the review). If no
-  combination avoids persisting, stop and raise it before building part 3.
+  combination avoids persisting, stop and raise it before building part 3. Found on a real
+  machine: the review runs as built (`--tools ""` leaves only Claude Code's internal
+  structured-output tool; no transcript is persisted) and no hook fired, but a project's
+  `.mcp.json` server was started for it; the author approved adding `--strict-mcp-config`
+  (with no `--mcp-config`, so no MCP server loads).
 - Verify `claude --bg` without `--resume` starts a new background session and honors
-  `--session-id`. If not, start-new uses the tmux fallback.
+  `--session-id`. If not, start-new uses the tmux fallback. Found on a real machine: it starts
+  one but ignores `--session-id`, so start-new keeps `claude --bg` and finds the new id after
+  the start (see "Acting on suggestions").
 - Which record marks a compaction in the transcript, if any.
 - How to edit vigil's TOML config while preserving comments (e.g. `tomlkit`, a new dependency)
   or a line-based edit of the one key.

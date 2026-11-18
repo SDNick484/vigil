@@ -5,6 +5,7 @@ output never raises. Callers treat an empty result as "status unknown".
 """
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -19,6 +20,14 @@ _BG_FLAG = re.compile(r"^\s+(?:-\w+,\s+)?--bg\b", re.MULTILINE)
 # A subcommand line in `--help`: two-space indent, then the name ("stop|kill <id>" lists aliases).
 _COMMAND = r"^  {name}(?:\|\w+)*(?:\s|$)"
 _VERSION = re.compile(r"^\s*(\d+\.\d+\.\d+[\w.+-]*)")
+# What `claude --bg` prints once it has started a session: "backgrounded · 1a2b3c4d (idle …)".
+_BACKGROUNDED = re.compile(r"\bbackgrounded\W+([0-9a-f]{8})\b")
+# A terminal control sequence (colors, bold): stripped before reading what `claude` printed.
+_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+# Session IDs are UUIDs; anything else (a leading "-" in particular) is refused rather than passed
+# to `claude` or `tmux`, where it could read as an option or a tmux target pattern.
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 @dataclass(frozen=True)
@@ -174,3 +183,37 @@ def live_sessions_or_none(
         return None
     out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
     return _parse_live(out) if out is not None else None
+
+
+def background_job(output: str) -> str | None:
+    """The job id (the first 8 characters of the session id) of the session `claude --bg` said
+    it started in `output`, or None when it said none."""
+    match = _BACKGROUNDED.search(_CSI.sub("", output))
+    return match.group(1) if match else None
+
+
+def started_session(output: str, cwd: str, claude: str = "claude") -> str | None:
+    """The full id of the session a `claude --bg` run in `cwd` started, given what it printed:
+    the one running session (`claude agents --json`, asked now) whose id starts with the job id
+    in `output` and whose folder is `cwd`. None when `output` has no job id, the running
+    sessions cannot be listed, not exactly one matches, or what matches is not a session id
+    (`SESSION_ID`).
+
+    `claude --bg --resume <id>` may start a copy under a new id (a background session keeps its
+    own options), and without `--resume` it picks the new session's id itself."""
+    job = background_job(output)
+    if job is None:
+        return None
+    out = _run([claude, "agents", "--json"], _LIVE_TIMEOUT)
+    live = _parse_live(out) if out is not None else None
+    if not live:
+        return None
+    folder = os.path.realpath(cwd)
+    found = [
+        s.session_id
+        for s in live.values()
+        if s.session_id.startswith(job) and s.cwd is not None and os.path.realpath(s.cwd) == folder
+    ]
+    if len(found) != 1 or not SESSION_ID.fullmatch(found[0]):
+        return None
+    return found[0]

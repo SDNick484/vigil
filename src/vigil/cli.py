@@ -26,6 +26,7 @@ COMMANDS.append(import_module("vigil.commands.show").COMMAND)
 COMMANDS.append(import_module("vigil.commands.resume").COMMAND)
 COMMANDS.append(import_module("vigil.commands.serve").COMMAND)
 COMMANDS.append(import_module("vigil.commands.usage").COMMAND)
+COMMANDS.append(import_module("vigil.commands.review").COMMAND)
 
 
 def build_parser() -> argparse.ArgumentParser:

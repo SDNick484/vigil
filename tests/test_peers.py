@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -31,7 +32,11 @@ from tests.conftest import (
     SKIP_REMOTE_FIXTURE,
     VigilEnv,
 )
+from tests.test_review_runner import ANSWER, claude_result
+from tests.test_review_store import NUMBERS
+from tests.test_review_web import CATALOG, file_card, flag_card
 from vigil import peers
+from vigil.apply import file_hash
 from vigil.config import Config, ConfigError, Peer, ResumeConfig, ServerConfig, load_config
 from vigil.index.db import connect
 from vigil.index.queries import list_sessions, set_meta
@@ -45,6 +50,9 @@ from vigil.peers import (
     local_machine,
     session_from_dict,
 )
+from vigil.review.numbers import numbers_to_dict
+from vigil.review.schema import Suggestion
+from vigil.review.store import finish, insert_running
 from vigil.serialize import session_to_dict
 from vigil.web import WebState
 from vigil.web.app import create_app
@@ -440,10 +448,11 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {HANDMADE}",
+        "attach": f"claude attach {HANDMADE[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # a link did not turn up within the (short) test wait
+        "at_desk": True,
         "machine": "peer-b",
     }
     # peer-b started it, in its own folder for the session; nothing opened a terminal.
@@ -543,6 +552,54 @@ def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> No
     with pytest.raises(peers.ResumeForwardError) as refused:
         peers.forward_resume(peer, HANDMADE, transport=network.transport())
     assert refused.value.restartable is False
+
+
+def test_forward_resume_carries_a_copy(tmp_path: Path) -> None:
+    """A peer whose `claude --bg` started a copy of the session says so: `copy_of`, and the
+    copy's `session_id` when it knows it, each passed on only when it is a session id."""
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    copy = "5e6f7a8b-0000-4000-8000-00000000000c"
+    answer: dict[str, Any] = {"ok": True, "attach": "claude attach 5e6f7a8b"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=answer)
+
+    network = Network(hosts={PEER_B_HOST: handle})
+    answer.update(opened_terminal=False, copy_of=HANDMADE, session_id=copy)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert (forwarded["copy_of"], forwarded["session_id"]) == (HANDMADE, copy)
+    answer.update(session_id="-not an id")
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded["copy_of"] == HANDMADE and "session_id" not in forwarded
+    answer.update(copy_of="-not an id", session_id=copy)
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert "copy_of" not in forwarded and "session_id" not in forwarded
+
+
+def test_forwarded_resume_says_whether_it_was_asked_at_the_desk(machines: Machines) -> None:
+    """The page goes to a peer's Remote Control link only away from the desk: at the desk it
+    shows the link and the attach command instead (`at_desk`)."""
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+
+    def peer_b(request: httpx.Request) -> httpx.Response:
+        answer = {"ok": True, "attach": "claude attach x", "opened_terminal": False}
+        return httpx.Response(200, json={**answer, "remote_url": link, "at_desk": False})
+
+    machines.network.hosts[PEER_B_HOST] = peer_b
+    for url in (
+        f"/peers/peer-b/sessions/{HANDMADE}/resume",
+        "/peers/peer-b/reviews/1/suggestions/0/resume",
+        "/peers/peer-b/reviews/1/suggestions/0/start-new",
+    ):
+        response = machines.laptop.post(url)
+        assert response.status_code == 200, response.text
+        assert response.json()["remote_url"] == link
+        assert response.json()["at_desk"] is True  # the laptop's own request is a loopback one
+    response = machines.laptop.post(
+        f"/peers/peer-b/sessions/{HANDMADE}/restart-remote", data={"confirm": "yes"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["at_desk"] is True
 
 
 def test_forward_restart(tmp_path: Path) -> None:
@@ -893,3 +950,537 @@ def test_peer_row_shows_the_busy_warning_from_the_owner(machines: Machines) -> N
     answer["busy"] = False
     machines.hub.forget("peer-c")
     assert busy_copy not in row_html(machines.laptop.get("/").text, row_id)
+
+
+# --- reviews and suggestion actions on a peer's session ------------------------------------------
+
+LINK_ATTRIBUTE = re.compile(r'(?:hx-get|hx-post|action)="([^"]*)"')
+
+
+def peer_b_review(machines: Machines, *cards: Suggestion, done: bool = True) -> int:
+    """A review of HANDMADE in peer-b's index (finished with `cards` unless not `done`), with a
+    catalog for peer-b's claude."""
+    conn = connect(machines.peer_b_index)
+    with conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO catalog (version, kind, name, short, parent, description) "
+            "VALUES ('2.1.312', 'flag', ?, NULL, NULL, ?)",
+            CATALOG,
+        )
+    review_id = insert_running(
+        conn,
+        session_id=HANDMADE,
+        machine="placeholder-host",
+        numbers=NUMBERS,
+        claude_version="2.1.312",
+        model="sonnet",
+    )
+    if done:
+        finish(conn, review_id, suggestions=list(cards), advice=[], cost_usd=0.1)
+    conn.close()
+    return review_id
+
+
+def set_peer_b(machines: Machines, statement: str, *params: object) -> None:
+    conn = sqlite3.connect(machines.peer_b_index)
+    with conn:
+        conn.execute(statement, params)
+    conn.close()
+
+
+def test_forward_review_start(machines: Machines) -> None:
+    env, laptop, network = machines.env, machines.laptop, machines.network
+    env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+
+    response = laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/review")
+    assert response.status_code == 202, response.text
+    review_id = response.json()["review_id"]
+    assert response.json() == {"ok": True, "review_id": review_id}
+    (forwarded,) = [r for r in network.to(PEER_B_HOST) if r.method == "POST"]
+    assert forwarded.url == httpx.URL(f"{PEER_B_URL}/sessions/{HANDMADE}/review")
+    assert forwarded.headers["authorization"] == f"Bearer {TOKEN_B}"
+    assert forwarded.content == b""
+
+    # peer-b runs it, in its own folder for the session, and keeps it in its own index.
+    deadline = time.monotonic() + 15
+    while True:
+        listed = laptop.get(f"/peers/peer-b/api/v1/sessions/{HANDMADE}/reviews")
+        assert listed.status_code == 200, listed.text
+        (review,) = listed.json()
+        if review["status"] != "running" or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    assert (review["id"], review["status"], review["machine"]) == (review_id, "done", "peer-b")
+    titles = [s["title"] for s in review["suggestions"]]
+    assert titles == ["Plan first", "Note the test command", "Say which file"]
+    assert [s["index"] for s in review["suggestions"]] == [0, 1, 2]  # what the actions take
+    runs = [call for call in env.bin.calls("claude") if "-p" in call.argv]
+    assert [call.cwd for call in runs] == [str(machines.peer_b_cwd)]
+    conn = sqlite3.connect(env.index)
+    assert conn.execute("SELECT count(*) FROM reviews").fetchone()[0] == 0
+    conn.close()
+
+
+def test_forward_review_poll_renders_local_links(machines: Machines) -> None:
+    laptop = machines.laptop
+    review_id = peer_b_review(machines, done=False)
+    url = f"/peers/peer-b/sessions/{HANDMADE}/reviews/{review_id}"
+    running = laptop.get(url)
+    assert running.status_code == 200, running.text
+    assert 'hx-trigger="every 2s"' in running.text
+    assert f'hx-get="{url}"' in running.text
+
+    conn = connect(machines.peer_b_index)
+    cards = [
+        flag_card("--model", "opus"),
+        file_card("project_claude_md", "Run the tests."),
+        file_card("user_claude_md", "Be brief."),
+        flag_card("--dangerously-skip-permissions", None),
+    ]
+    finish(conn, review_id, suggestions=cards, advice=[], cost_usd=0.1)
+    conn.close()
+    done = laptop.get(url)
+    assert done.status_code == 200
+    assert "hx-trigger" not in done.text
+    links = LINK_ATTRIBUTE.findall(done.text)
+    assert links and all(link.startswith("/peers/peer-b/") for link in links), links
+    base = f"/peers/peer-b/reviews/{review_id}/suggestions"
+    for action in ("resume", "start-new", "always-use"):
+        assert f'hx-post="{base}/0/{action}"' in done.text
+    assert f'hx-get="{base}/1/change"' in done.text
+    # Copy-only cards are decided here as for a local review: a user target, a refused flag.
+    assert f"{base}/2/" not in done.text and f"{base}/3/" not in done.text
+    assert "CLAUDE.md in the Claude home on peer-b" in done.text
+    assert str(machines.env.claude_home) not in done.text
+    assert "claude --dangerously-skip-permissions" in done.text
+
+    # The peer's session page has the reviews, and starts one through the mirror.
+    page = laptop.get(f"/peers/peer-b/sessions/{HANDMADE}").text
+    assert "Review this session" in page
+    assert f'hx-post="/peers/peer-b/sessions/{HANDMADE}/review"' in page
+    assert f'id="review-{review_id}"' in page
+    links = LINK_ATTRIBUTE.findall(page.split("<script>")[0])
+    assert links and all(link.startswith("/peers/peer-b/") for link in links), links
+
+    # A review the peer no longer has, or of another session: polling stops.
+    for gone in (
+        f"/peers/peer-b/sessions/{HANDMADE}/reviews/{review_id + 1}",
+        f"/peers/peer-b/sessions/{C_SESSION}/reviews/{review_id}",
+    ):
+        response = laptop.get(gone)
+        assert response.status_code == 286
+        assert "This review is no longer available." in response.text
+
+
+def test_second_press_on_a_peer_shows_its_running_review(machines: Machines) -> None:
+    """The peer's 409 keeps the running review's id, and its fragment says whose it is."""
+    machines.env.bin.install("claude", stdout=claude_result(structured_output=ANSWER))
+    review_id = peer_b_review(machines, done=False)
+    response = machines.laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/review")
+    assert response.status_code == 409, response.text
+    assert response.json()["review_id"] == review_id
+    fragment = machines.laptop.get(f"/peers/peer-b/sessions/{HANDMADE}/reviews/{review_id}")
+    assert fragment.status_code == 200 and 'hx-trigger="every 2s"' in fragment.text
+    other = machines.laptop.get(f"/peers/peer-b/sessions/{C_SESSION}/reviews/{review_id}")
+    assert other.status_code == 286
+    assert "A review of another session is running" in other.text
+
+
+def test_peer_review_is_cleaned(machines: Machines) -> None:
+    """What a peer sends about a review is checked here again before it is shown."""
+    review = {
+        "id": 7,
+        "session_id": C_SESSION,
+        "machine": "not-used",
+        "created_at": "2026-11-01T10:00:00.000000+00:00",
+        "finished_at": "2026-11-01T10:01:00.000000+00:00",
+        "status": "done",
+        "cost_usd": 10**400,  # too large for a float
+        "numbers": dict(NUMBERS_DICT, cache_hit_share=10**400),
+        "suggestions": [
+            {"kind": "bogus", "title": "Dropped", "why": "not a kind"},
+            {
+                "kind": "flag",
+                "title": "Bell\x07 <script>x</script>",
+                "why": "w" * 600,
+                "evidence": "",
+                "flag_name": "--model",
+                "flag_value": "opus",
+            },
+        ],
+        "advice": [{"title": "Short", "why": "<b>bold</b>"}, "not advice"],
+        "error": None,
+    }
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/reviews/7":
+            return httpx.Response(200, json=review)
+        if request.url.path == f"/api/v1/sessions/{C_SESSION}/reviews":
+            return httpx.Response(200, json=[review])
+        return httpx.Response(200, json=[canned_session()])
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    fragment = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}/reviews/7").text
+    assert "Dropped" not in fragment
+    # The card keeps the peer's position for it: actions name it by that.
+    assert 'hx-post="/peers/peer-c/reviews/7/suggestions/1/resume"' in fragment
+    assert "/suggestions/0/" not in fragment
+    assert "\x07" not in fragment and "<script>" not in fragment and "<b>" not in fragment
+    assert "Bell &lt;script&gt;x&lt;/script&gt;" in fragment
+    assert "w" * 500 in fragment and "w" * 501 not in fragment
+    assert "Numbers the review was given" not in fragment
+    assert "$" not in fragment.split("</h3>")[0]  # no cost shown
+
+    # The reviews list mirror and the session page read the same review without failing.
+    listed = machines.laptop.get(f"/peers/peer-c/api/v1/sessions/{C_SESSION}/reviews")
+    assert listed.status_code == 200, listed.text
+    assert [(r["id"], r["cost_usd"], r["numbers"]) for r in listed.json()] == [(7, None, None)]
+    page = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}")
+    assert page.status_code == 200 and 'id="review-7"' in page.text
+    review["cost_usd"] = 0.25
+    fragment = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}/reviews/7").text
+    assert "$0.25" in fragment
+
+    review["status"] = "exploded"
+    response = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}/reviews/7")
+    assert response.status_code == 286
+    assert "peer-c: answered something that is not a review" in response.text
+
+
+def test_peer_session_page_on_an_older_vigil(machines: Machines) -> None:
+    """A peer whose vigil predates reviews answers 404 for them, as FastAPI does for any path
+    it does not have."""
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/sessions":
+            return httpx.Response(200, json=[canned_session()])
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    page = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}")
+    assert page.status_code == 200, page.text
+    assert "peer-c runs an older vigil without reviews." in page.text
+    assert "Not Found" not in page.text
+
+    # Any other failure still says the reviews could not be read, and why.
+    machines.network.hosts[PEER_C_HOST] = lambda request: (
+        peer_c(request)
+        if request.url.path == "/api/v1/sessions"
+        else httpx.Response(500, json={"detail": "boom"})
+    )
+    page = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}")
+    assert "The reviews could not be read: peer-c: " in page.text
+
+
+def test_peer_session_page_shows_token_numbers(machines: Machines) -> None:
+    usage = FIXTURE_TRANSCRIPTS / "handmade" / "usage.jsonl"
+    set_peer_b(
+        machines,
+        "UPDATE sessions SET transcript_path = ? WHERE session_id = ?",
+        str(usage),
+        HANDMADE,
+    )
+    page = machines.laptop.get(f"/peers/peer-b/sessions/{HANDMADE}").text
+    assert "<h2>Where the tokens went</h2>" in page
+    assert '<span class="tabular-nums">180</span>' in page  # total output tokens
+    asked = {r.url.path for r in machines.network.to(PEER_B_HOST)}
+    assert f"/api/v1/sessions/{HANDMADE}/numbers" in asked
+    assert f"/api/v1/sessions/{HANDMADE}/reviews" in asked
+
+
+def test_forward_apply_hash_passed_through(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    laptop, network = machines.laptop, machines.network
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(machines.peer_b_cwd.parent))
+    review_id = peer_b_review(machines, file_card("project_claude_md", "Run the <tests>."))
+    base = f"/peers/peer-b/reviews/{review_id}/suggestions/0"
+    target = machines.peer_b_cwd.resolve() / "CLAUDE.md"
+
+    fragment = laptop.get(f"{base}/change")
+    assert fragment.status_code == 200, fragment.text
+    assert "+Run the &lt;tests&gt;." in fragment.text
+    assert f"{target} (new file)" in fragment.text
+    assert f'hx-post="{base}/apply"' in fragment.text
+    found = re.search(r'name="before_hash" value="([^"]*)"', fragment.text)
+    assert found is not None
+    previewed = found.group(1)
+    assert previewed == file_hash(target, None)
+    assert not target.exists()
+
+    response = laptop.post(f"{base}/apply", data={"before_hash": previewed, "path": "/etc/x"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "path": str(target), "machine": "peer-b"}
+    assert target.read_text() == "Run the <tests>.\n"
+    (forwarded,) = [r for r in network.to(PEER_B_HOST) if r.method == "POST"]
+    assert forwarded.url.path == f"/reviews/{review_id}/suggestions/0/apply"
+    assert forwarded.content == f"before_hash={previewed}".encode()  # and nothing else
+
+    # The hash is checked on peer-b: the file is no longer as previewed.
+    response = laptop.post(f"{base}/apply", data={"before_hash": previewed})
+    assert response.status_code == 409
+    assert response.json() == {
+        "ok": False,
+        "reason": "peer-b: the file changed since the preview; show the change again",
+    }
+    assert target.read_text() == "Run the <tests>.\n"
+
+
+def test_forward_always_use_changes_peer_not_local(machines: Machines, tmp_path: Path) -> None:
+    laptop, network = machines.laptop, machines.network
+    review_id = peer_b_review(machines, flag_card("--model", "opus"))
+    # peer-b's own config file (both services share this process's environment).
+    peer_b_config = tmp_path / "peer_b_config"
+    (peer_b_config / "vigil").mkdir(parents=True)
+    (peer_b_config / "vigil" / "config.toml").write_text("# peer-b\n")
+    serve_b = network.hosts[PEER_B_HOST]
+
+    def as_peer_b(request: httpx.Request) -> httpx.Response:
+        laptop_config_home = os.environ["XDG_CONFIG_HOME"]
+        os.environ["XDG_CONFIG_HOME"] = str(peer_b_config)
+        try:
+            return serve_b(request)
+        finally:
+            os.environ["XDG_CONFIG_HOME"] = laptop_config_home
+
+    network.hosts[PEER_B_HOST] = as_peer_b
+    local_config = Path(os.environ["XDG_CONFIG_HOME"]) / "vigil" / "config.toml"
+    before = local_config.read_bytes()
+
+    url = f"/peers/peer-b/reviews/{review_id}/suggestions/0/always-use"
+    response = laptop.post(url, data={"flag": "--dangerously-skip-permissions"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "default_flags": ["--model", "opus"],
+        "machine": "peer-b",
+    }
+    assert "--model" in (peer_b_config / "vigil" / "config.toml").read_text()
+    (forwarded,) = [r for r in network.to(PEER_B_HOST) if r.method == "POST"]
+    assert forwarded.url.path == f"/reviews/{review_id}/suggestions/0/always-use"
+    assert forwarded.content == b""
+    # This machine's config is untouched.
+    assert local_config.read_bytes() == before
+    assert machines.hub is not None
+    web: WebState = laptop.app.state.vigil  # type: ignore[attr-defined]
+    assert web.config.resume.default_flags == ()
+
+
+def test_forward_refusal_prefixed(machines: Machines) -> None:
+    laptop, network = machines.laptop, machines.network
+    review_id = peer_b_review(
+        machines,
+        flag_card("--dangerously-skip-permissions", None),
+        file_card("user_claude_md", "Be brief."),
+    )
+    base = f"/peers/peer-b/reviews/{review_id}/suggestions"
+    refused = {"ok": False, "reason": "peer-b: flag not allowed: --dangerously-skip-permissions"}
+    for action in ("resume", "start-new", "always-use"):
+        response = laptop.post(f"{base}/0/{action}")
+        assert (response.status_code, response.json()) == (409, refused), action
+    user_target = (
+        "peer-b: vigil does not change files under the Claude home; copy the text to add it "
+        "yourself"
+    )
+    response = laptop.get(f"{base}/1/change")
+    assert (response.status_code, response.json()["reason"]) == (409, user_target)
+    response = laptop.post(f"{base}/1/apply", data={"before_hash": "0" * 64})
+    assert (response.status_code, response.json()["reason"]) == (409, user_target)
+    response = laptop.post(f"{base}/5/resume")
+    assert response.status_code == 404
+    assert response.json()["reason"] == f"peer-b: review {review_id} has no suggestion 5"
+    set_peer_b(machines, "UPDATE sessions SET cwd = '/nonexistent/gone'")
+    response = laptop.post(f"/peers/peer-b/sessions/{HANDMADE}/review")
+    assert response.status_code == 409
+    assert response.json()["reason"] == "peer-b: folder no longer exists: /nonexistent/gone"
+    assert machines.env.bin.calls("claude") == []
+
+    # Only peers in the config, only session ids, only a hash as a hash: nothing is sent.
+    asked = len(network.requests)
+    response = laptop.post(f"/peers/nobody/sessions/{HANDMADE}/review")
+    assert response.status_code == 404 and "no peer called 'nobody'" in response.json()["reason"]
+    assert laptop.post("/peers/nobody/reviews/1/suggestions/0/resume").status_code == 404
+    response = laptop.get(f"/peers/nobody/sessions/{HANDMADE}/reviews/1")
+    assert (response.status_code, response.json()["reason"]) == (404, "no peer called 'nobody'")
+    assert laptop.post("/peers/peer-b/sessions/-rf/review").status_code == 404
+    assert laptop.get("/peers/peer-b/reviews/x/suggestions/0/change").status_code == 422
+    response = laptop.post(f"{base}/1/apply", data={"before_hash": "../../etc"})
+    assert response.status_code == 409
+    assert len(network.requests) == asked
+    # The mirrors are guarded like any other POST: same origin only.
+    evil = {"Origin": "http://evil.example"}
+    assert laptop.post(f"{base}/0/resume", headers=evil).status_code == 403
+    assert len(network.requests) == asked
+
+
+def test_forward_unreachable_502(machines: Machines, tmp_path: Path) -> None:
+    laptop, network = machines.laptop, machines.network
+    del network.hosts[PEER_B_HOST]
+    reason = "peer-b: unreachable: connection refused"
+    base = "/peers/peer-b/reviews/1/suggestions/0"
+    for url in (
+        f"/peers/peer-b/sessions/{HANDMADE}/review",
+        f"{base}/resume",
+        f"{base}/start-new",
+        f"{base}/always-use",
+        f"{base}/apply",
+    ):
+        response = laptop.post(url, data={"before_hash": "0" * 64})
+        assert (response.status_code, response.json()) == (502, {"ok": False, "reason": reason})
+    for url in (f"{base}/change", f"/peers/peer-b/api/v1/sessions/{HANDMADE}/reviews"):
+        response = laptop.get(url)
+        assert (response.status_code, response.json()) == (502, {"ok": False, "reason": reason})
+    fragment = laptop.get(f"/peers/peer-b/sessions/{HANDMADE}/reviews/1")
+    assert fragment.status_code == 286  # polling stops; the page can be reloaded
+    assert reason in fragment.text
+
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    answer = peers.forward(
+        peer, "GET", "/api/v1/reviews/1", timeout=1.0, transport=network.transport()
+    )
+    assert answer == (502, {"ok": False, "reason": reason})
+
+
+def test_forward_answers(tmp_path: Path) -> None:
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+    answers: list[httpx.Response] = []
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return answers.pop(0)
+
+    transport = Network(hosts={PEER_B_HOST: handle}).transport()
+
+    def ask(answer: httpx.Response, form: dict[str, str] | None = None) -> tuple[int, object]:
+        answers.append(answer)
+        return peers.forward(peer, "POST", "/x", form, timeout=1.0, transport=transport)
+
+    assert ask(httpx.Response(202, json={"ok": True, "review_id": 3})) == (
+        202,
+        {"ok": True, "review_id": 3},
+    )
+    assert ask(httpx.Response(200, json=[1, 2])) == (200, [1, 2])
+    assert ask(httpx.Response(200, html="<p>hi</p>")) == (200, "<p>hi</p>")
+    assert ask(httpx.Response(200, text="plain")) == (
+        502,
+        {"ok": False, "reason": "peer-b: answered something that is not JSON"},
+    )
+    busy = {"ok": False, "reason": "a review is already running", "review_id": 4, "x": "y"}
+    assert ask(httpx.Response(409, json=busy)) == (
+        409,
+        {"ok": False, "reason": "peer-b: a review is already running", "review_id": 4},
+    )
+    assert ask(httpx.Response(404, json={"detail": "no session"})) == (
+        404,
+        {"ok": False, "reason": "peer-b: no session"},
+    )
+    status, body = ask(httpx.Response(400, json={"detail": "bad host"}))
+    assert status == 502 and "is this host in its server.allowed_hosts?" in str(body)
+    status, body = ask(httpx.Response(500, json={"reason": "boom"}))
+    assert (status, body) == (502, {"ok": False, "reason": "peer-b: answered HTTP 500"})
+    ask(httpx.Response(200, json={}), {"before_hash": "ab"})
+    assert seen[-1].content == b"before_hash=ab"
+    assert seen[-1].headers["authorization"] == f"Bearer {TOKEN_B}"
+
+
+def test_forward_suggestion_resume_and_start_new(machines: Machines) -> None:
+    env, laptop = machines.env, machines.laptop
+    env.bin.install("claude", stdout=CLAUDE_BG)
+    review_id = peer_b_review(machines, flag_card("--model", "opus"))
+    base = f"/peers/peer-b/reviews/{review_id}/suggestions/0"
+
+    response = laptop.post(f"{base}/resume")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {HANDMADE[:8]}",
+        "opened_terminal": False,
+        "remote_url": None,
+        "pending": True,  # a link did not turn up within the (short) test wait
+        "at_desk": True,
+        "machine": "peer-b",
+    }
+    response = laptop.post(f"{base}/start-new")
+    assert response.status_code == 200, response.text
+    assert response.json()["machine"] == "peer-b"
+    # peer-b launched both, with the stored flag, in its own folder for the session.
+    started = [call for call in env.bin.calls("claude") if "--bg" in call.argv]
+    assert len(started) == 2
+    assert started[0].argv == ["--bg", "--resume", HANDMADE, "--remote-control", "--model", "opus"]
+    assert started[1].argv[:1] == ["--bg"] and started[1].argv[-2:] == ["--model", "opus"]
+    assert {call.cwd for call in started} == {str(machines.peer_b_cwd)}
+
+
+NUMBERS_DICT: dict[str, Any] = numbers_to_dict(NUMBERS)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"cache_hit_share": 10**400},
+        {"cache_hit_share": float("nan")},
+        {"cache_hit_share": 2},
+        {"compactions": 2**63},
+        {"compactions": -1},
+        {"compactions": True},
+        {"totals": dict(NUMBERS_DICT["totals"], output=10**400)},
+        {"turns": [dict(NUMBERS_DICT["turns"][0], input=2**63)]},
+        {"largest_tool_outputs": [{"tool": "Bash", "size": 10**400}]},
+        {"turns": "not a list"},
+    ],
+)
+def test_numbers_from_peer_refuses_out_of_range(change: dict[str, Any]) -> None:
+    assert peers.numbers_from_peer(NUMBERS_DICT) == NUMBERS
+    assert peers.numbers_from_peer({**NUMBERS_DICT, **change}) is None
+
+
+def test_review_from_peer_bounds_numbers() -> None:
+    review = {
+        "id": 7,
+        "session_id": C_SESSION,
+        "created_at": "2026-11-01T10:00:00.000000+00:00",
+        "status": "done",
+        "cost_usd": 10**400,
+        "numbers": dict(NUMBERS_DICT, compactions=10**400),
+    }
+    found = peers.review_from_dict(review, "peer-c")
+    assert found is not None
+    assert (found.cost_usd, found.numbers) == (None, None)
+    assert peers.review_from_dict({**review, "cost_usd": 0.5}, "peer-c").cost_usd == 0.5  # type: ignore[union-attr]
+    for review_id in (2**63, -1, 10**400, True, 7.0):
+        assert peers.review_from_dict({**review, "id": review_id}, "peer-c") is None
+
+
+def test_forward_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
+
+    # A redirect is not followed: the token goes to peer-b only.
+    def redirect(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": f"{PEER_C_URL}/api/v1/reviews/1"})
+
+    network = Network(hosts={PEER_B_HOST: redirect, PEER_C_HOST: peer_c_handler})
+    answer = peers.forward(
+        peer, "GET", "/api/v1/reviews/1", timeout=1.0, transport=network.transport()
+    )
+    reason = "peer-b: answered 302 (a redirect, which is not followed)"
+    assert answer == (502, {"ok": False, "reason": reason})
+    assert network.to(PEER_C_HOST) == []
+    assert [r.url.host for r in network.requests] == [PEER_B_HOST]
+
+    # An answer over the cap.
+    monkeypatch.setattr(peers, "MAX_ANSWER_BYTES", 64)
+    network = Network(hosts={PEER_B_HOST: lambda r: httpx.Response(200, json=["x" * 100])})
+    answer = peers.forward(peer, "GET", "/x", timeout=1.0, transport=network.transport())
+    assert answer == (502, {"ok": False, "reason": "peer-b: answer larger than 64 bytes"})
+
+    # A timeout, connecting or reading.
+    for error in (httpx.ConnectTimeout, httpx.ReadTimeout):
+        answer = peers.forward(peer, "POST", "/x", timeout=1.0, transport=failing(error))
+        assert answer == (502, {"ok": False, "reason": "peer-b: timed out"})
+    # An answer still coming in after the deadline.
+    clock = iter([0.0])  # the request starts at 0; every later look at the clock is 5 s on
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock, 5.0))
+    network = Network(hosts={PEER_B_HOST: lambda r: httpx.Response(200, json={"ok": True})})
+    answer = peers.forward(peer, "GET", "/x", timeout=1.0, transport=network.transport())
+    assert answer == (502, {"ok": False, "reason": "peer-b: timed out after 1 s"})

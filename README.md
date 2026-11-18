@@ -142,6 +142,11 @@ To restart:
 
 The index and your labels, notes and pins are kept.
 
+**Upgrading from a version without Remote Control links:** the first scan afterwards (which
+`vigil serve` runs when it starts) reads every transcript again from the start, once, to find
+each session's link. On a large history that scan takes longer than usual; nothing is lost. This
+version also needs `tomlkit`, which the commands above install along with it.
+
 ## Uninstall
 
 1. Stop vigil (see **To restart** under [Upgrade](#upgrade)) and remove the autostart entry or
@@ -181,13 +186,15 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | --- | --- | --- |
 | `claude_home` | `"~/.claude"` | Claude Code's data folder. vigil only reads it and never writes there. |
 | `port` | `7787` | Port for `vigil serve`, 1 to 65535. |
-| `resume.default_flags` | `[]` | Flags added to every resume (vigil always adds `--remote-control` itself). Only `--remote-control`, `--model`, `--effort`, `--permission-mode` and `--name` are allowed, each optionally followed by its value, e.g. `["--model", "opus"]`. |
+| `resume.default_flags` | `[]` | Flags added to every resume (vigil always adds `--remote-control` itself). Only `--remote-control`, `--name`, `--model`, `--effort`, `--permission-mode` (not `bypassPermissions`), `--agent`, `--worktree`, `--chrome`, `--no-chrome`, `--ide`, `--verbose` and `--brief` are allowed, each with a value its rule accepts, e.g. `["--model", "opus"]`. |
 | `resume.terminal_command` | unset | Command template that opens a terminal. Must contain `{attach}`, e.g. `"mate-terminal -- {attach}"`. Unset means `$TERMINAL`, then a list of known terminals. |
 | `resume.launcher` | `"auto"` | `"auto"` uses `claude --bg` when the installed `claude` supports it and falls back to tmux; `"bg"` and `"tmux"` force one. |
 | `resume.remote_link_timeout` | `30` | Seconds, 1 to 300, to wait for a session's Remote Control link after Resume starts it for a request from another device. |
 | `usage.shell_history` | `false` | Read your shell history to see how you launch `claude`. Off unless you turn it on. |
 | `usage.history_files` | `[]` | History files to read. Empty means the default bash, zsh and fish locations. A leading `~` is expanded. |
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |
+| `review.max_budget_usd` | `3.0` | Most a [session review](#session-reviews) may spend, in USD, 0.05 to 50 (`claude --max-budget-usd`). Claude Code checks it after each turn, so a review can go a little over. A review typically costs about $0.20 to $1 with Sonnet; Claude Code's own system prompt is most of that. |
+| `review.model` | `"sonnet"` | Model for session reviews (`claude --model`); `""` uses Claude Code's default. Same rule as `--model` in `resume.default_flags`. |
 | `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs `server.token_file`; see [Remote access](#remote-access). |
 | `server.token_file` | unset | File holding the access token, which turns remote access on. Must be an absolute path (a leading `~` is expanded) to a file you own with mode 0600 (0400 is fine too). |
 | `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs `server.token_file`. |
@@ -232,6 +239,10 @@ reference is at `/docs` while the service runs.
 | `GET /api/v1/sessions/{id}` | One session plus `chain` (every session of its resume chain, oldest first) and `resume_command`. `{id}` may also be a unique id prefix or the session's exact title. 404 if nothing matches. |
 | `GET /api/v1/projects` | Projects: `project_key`, `label`, `session_count`, `last_activity_at`. |
 | `GET /api/v1/health` | `status` (`"ok"`), `version` (vigil's), `claude_version` (null when `claude` is not found), `indexed_sessions`, `last_scan_at` (null until the service has scanned). |
+| `GET /api/v1/sessions/{id}/reviews` | The session's [reviews](#session-reviews), newest first: `id`, `status` (`running`, `done` or `failed`), `created_at`, `finished_at`, `cost_usd` (as Claude Code reported it), `model`, `claude_version`, `numbers` (the token numbers the review was given), `suggestions`, `advice` (token advice) and `error` (why it failed, or a note such as going over the budget). |
+| `GET /api/v1/sessions/{id}/numbers` | Where the session's tokens went, read from its transcript now: `turns` (per turn: `turn`, `input`, `output`, `cache_write`, `cache_read`), `totals`, `cache_hit_share`, `largest_tool_outputs` (`tool`, `size` in characters), `compactions`, `models`, `started_at`, `ended_at` and `launch_flags` (from launches vigil made only). 404 when the transcript cannot be read or holds no usage. |
+| `GET /api/v1/reviews/{rid}` | One review by its id, with the fields of the list above. 404 when there is none. |
+| `GET /api/v1/reviews/{rid}/suggestions/{i}/change` | The change file suggestion `i` (counted from 0) of review `rid` would make: `target` (the file), `new_file`, `diff`, `skipped` (settings keys left alone because they are already set, with their `current` value) and `before_hash`, which [Apply](#applying-file-suggestions) needs. Nothing is written. 409 with the reason when vigil will not apply it (then the text is only to be copied). |
 | `GET /api/v1/peers` | The configured [peers](#peers): `name`, `url`, `fetched_at`, `stale` (it could not be reached), `error` (why), `session_count`. Their sessions are not in `/api/v1/sessions`, which lists this machine's only. |
 
 `GET /api/v1/sessions` takes these query parameters, all optional:
@@ -262,21 +273,62 @@ Each session has the same fields as `vigil ls --json` (and `vigil show --json` f
 | `project_key`, `project_label` | The project: git remote URL, else the folder. |
 | `transcript_path` | The transcript file. |
 | `remote_url`, `remote_url_at` | The session's Claude Remote Control link (null if none) and when it was written. |
+| `open_url` | The link to join the session by right now: `remote_url` when the session is live and the link is from its current run; else null (also when live sessions are not known). |
+| `busy` | `true` when the session is live and working on something right now. |
 | `status` | `running` (open in a terminal), `background`, `idle`, or `unknown` when the installed `claude` cannot list live sessions. Refreshed at most every 5 seconds. |
 
-Two actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own
+These actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own
 pages:
 
 - `POST /sessions/{id}/resume` resumes the session in its folder and opens a terminal on it when
-  one is available. It answers `{"ok": true, "attach": "<command>", "opened_terminal": <bool>}`,
-  or 409 with `{"ok": false, "reason": "<why>"}` when resume is refused (already open in a
-  terminal, folder gone, no `claude --bg` and no tmux), or 404 for an unknown session.
+  one is available. It answers `{"ok": true, "attach": "<command>", "opened_terminal": <bool>,
+  "remote_url": <link or null>, "pending": <bool>, "at_desk": <bool>}`, or 409 with
+  `{"ok": false, "reason": "<why>", "restartable": <bool>}` when resume is refused (already open
+  in a terminal, folder gone, no `claude --bg` and no tmux), or 404 for an unknown session. For a
+  request from another device, `remote_url` is the session's Remote Control link and `pending`
+  says it was started but no link turned up in time (see
+  [Joining from a phone](#joining-from-a-phone)); `at_desk` says the request came from this
+  machine; `restartable` says Restart with Remote Control would get past the refusal. The attach
+  command takes the session's 8-character job id (`claude attach 1a2b3c4d`), as `claude attach`
+  requires. When `claude --bg` started a copy of the session under a new id (see
+  [Joining from a phone](#joining-from-a-phone)), the answer also has `"copy_of": "<id asked
+  for>"` and `"session_id": "<the copy's id>"`, and the attach command and link are the copy's.
+  When `claude --bg` named the copy's job id but its full id cannot be found yet, `session_id` is
+  left out, the attach command uses that job id, and the link is `pending`.
+- `POST /sessions/{id}/restart-remote` with the form field `confirm=yes` (400 without it) stops a
+  session running in the background (`claude stop <job id>`) and starts it again with Remote
+  Control. It answers like a resume (such a session comes back as a copy, with `copy_of` and
+  `session_id`); a session that can already be joined is not stopped, and the answer carries its
+  link. 409 when the session is not running in the background, or cannot be stopped
+  or started again (the reason says which).
 - `POST /sessions/{id}/meta` sets vigil's own `label`, `note`, `pinned` and `archived` from form
   fields and returns the updated session. Only the fields sent change; an empty `label` or `note`
   clears it.
+- `POST /sessions/{id}/review` starts a [review](#session-reviews) of the session and answers
+  202 with `{"ok": true, "review_id": <id>}` at once; the review runs in the background. 409 with
+  `{"ok": false, "reason": "a review is already running", "review_id": <id>}` while another runs,
+  or with the reason when the session's folder is gone or `claude` is missing.
+- `POST /reviews/{rid}/suggestions/{i}/resume`, `/start-new` and `/always-use` act on flag
+  suggestion `i` (counted from 0) of review `rid`: [see below](#session-reviews). The flag is the
+  stored one; nothing else is sent. The first two answer like a resume; `always-use` answers
+  `{"ok": true, "default_flags": [...]}`. 409 with the reason when the flag is refused or vigil's
+  config cannot be written.
+- `POST /reviews/{rid}/suggestions/{i}/apply` with the form field `before_hash` (from the
+  preview) writes file suggestion `i` and answers `{"ok": true, "path": "<file written>"}`; 409
+  when the file changed since the preview or vigil will not apply it
+  ([see below](#applying-file-suggestions)).
 - `POST /peers/{name}/sessions/{id}/resume` resumes a session of a [peer](#peers) on that peer, and
   answers like the resume above plus `"machine": "<name>"`. The peer's own 404 and 409 come back
   with its reason; 502 when the peer cannot be reached or refuses the request.
+- Resume, restart, review and every suggestion action, and the review reads, have a mirror for
+  a peer's session under `/peers/{name}/…` (`/peers/{name}/sessions/{id}/restart-remote`,
+  `/peers/{name}/sessions/{id}/review`, `/peers/{name}/reviews/{rid}/suggestions/{i}/…`,
+  `/peers/{name}/api/v1/sessions/{id}/reviews` and so on) that forwards it to that peer, which
+  checks and carries it out itself; answers carry `"machine": "<name>"`.
+
+The pages also fetch two HTML fragments: `GET /sessions/{id}/reviews/{rid}` (one review, which
+reloads itself while it runs) and `GET /reviews/{rid}/suggestions/{i}/change` (a file
+suggestion's diff and its Apply form, or the text to copy and why).
 
 The service only answers requests whose `Host` is `127.0.0.1`, `localhost` or `[::1]` (400
 otherwise), which stops other web sites reaching it through DNS rebinding. A POST must carry an
@@ -288,6 +340,83 @@ header themselves:
 
 While it runs, the service watches `~/.claude/projects` and indexes changed transcripts within a
 second or two, with a full rescan every 10 minutes as a safety net.
+
+## Session reviews
+
+**Review this session** on a session's page (or `vigil review <id>`, which waits and prints the
+result; `--json` prints it as the API serves it) asks Claude what would make sessions like this
+one go better or cost less. vigil runs, in the session's folder:
+
+    claude -p --resume <id> --fork-session --no-session-persistence --tools "" \
+      --strict-mcp-config --output-format json --json-schema <schema> \
+      --max-budget-usd <review.max_budget_usd> [--model <review.model>] "<review prompt>"
+
+Claude reads a fork of the whole session that is not saved and has no tools, so the session itself
+is untouched and nothing new appears under `~/.claude`. No MCP server is loaded either, not even the
+project's own (`.mcp.json`): `--strict-mcp-config` with no `--mcp-config` keeps them out, so a
+review starts no server processes and has no tools beyond answering. The prompt carries the token
+numbers vigil computed from the transcript, the flags vigil launched the session with (only launches
+vigil made, so they may be incomplete), your `resume.default_flags` and the flags and subcommands of
+the installed `claude`. Claude answers with at most ten suggestions, each a flag, a change to
+CLAUDE.md or settings, or a habit, tied to evidence in the session, plus a few points of token
+advice. Every text field is cut to 500 characters and items that do not fit the schema are dropped.
+One review runs at a time on a machine (pressing **Review this session** while one runs shows the
+running one); reviews are kept until their session leaves the index.
+
+A review spends your Claude usage. With the `[review]` defaults it runs on `sonnet`
+(`review.model`) and may spend up to $3.00 (`review.max_budget_usd`; Claude Code checks it after
+each turn, so a review can go a little over); a review typically costs about $0.20 to $1. The
+session page says how much a review may spend next to the button.
+
+Suggestions come from Claude reading a transcript that can hold fetched web pages and other text
+you did not write, so they are untrusted: check them before acting on them. vigil acts on them
+only through the allow-lists below.
+
+A flag suggestion the allow-list accepts (the one for `resume.default_flags`, and offered by the
+installed `claude`) has three buttons:
+
+- **Resume with these** resumes the session with the flag added for that launch only. A session
+  that is already running is joined or attached to as it is.
+- **Start new session with these** starts a new session in the reviewed session's folder,
+  `claude --bg --remote-control [default flags] <flag>`. `claude --bg` picks the new session's id;
+  vigil reads it from what `claude --bg` prints and `claude agents --json`. With tmux (when there
+  is no `--bg`) it runs `claude --session-id <new id> …` under an id vigil chooses. At the desk it
+  opens a terminal; from another device it waits for the Remote Control link, like Resume. If
+  vigil knows only the new session's job id, it attaches by that and says its link is pending; if
+  `claude --bg` printed no job id at all, it says the session started, and `claude agents` lists
+  it.
+- **Always use** adds the flag to `resume.default_flags` in vigil's config file, replacing the
+  value of a flag already there. The rest of the file, comments included, is kept as written, and
+  the file is only replaced when the result is a valid config. This is the only write to vigil's
+  config from the web.
+
+Any other flag gets its command line to copy and run yourself; vigil will not launch it.
+
+### Applying file suggestions
+
+A file suggestion adds to the project's `CLAUDE.md` or `.claude/settings.json` (in the session's
+git top-level folder, else its working folder), or to your own `~/.claude/CLAUDE.md` or
+`~/.claude/settings.json`. **Show change** previews it as a diff; nothing is written until you
+press **Apply** under that preview. The preview carries a hash of the file, and Apply writes only
+if the file is still exactly as previewed (otherwise show the change again).
+
+- `CLAUDE.md` text is appended after a blank line; the file is created if it is missing.
+- Settings are merged in: objects merge, lists gain the entries they lack, and a value already set
+  is kept (the preview lists it with its current value). Only these keys are applied, each with a
+  value of its kind: `model` (printable text, 1 to 64 characters), `effortLevel` (`low`,
+  `medium`, `high`, `xhigh` or `max`), `permissions.deny` and `permissions.ask` (lists of
+  non-empty printable text), `includeCoAuthoredBy` (true or false), `cleanupPeriodDays` (a whole
+  number, at least 1) and any top-level key starting with `autoCompact` (text, a finite number,
+  or true or false). A suggestion with any other key, or a value of another kind, only shows its
+  text to copy.
+- vigil will not write through a symbolic link (the file or `.claude`), to something that is not
+  a regular file, to a file with an execute bit, inside a `.git` folder, outside the project
+  folder or under the Claude home. Text with invisible or unassigned characters (bidirectional
+  controls, tag characters and the like) is refused.
+- Suggestions for the files in `~/.claude` are copy-only: vigil never writes there, so they show
+  the text for you to add yourself.
+
+Existing text and settings are never changed, only added to.
 
 ## Remote access
 
@@ -333,9 +462,14 @@ cookie is signed with a random key that vigil creates in its data folder
 (`$XDG_DATA_HOME/vigil/session.key`, mode 0600); delete it, or change the token, to log every
 browser out.
 
-**Resume** from a remote request never opens a terminal on the machine running vigil; it starts
-the session and answers with the attach command (e.g. `claude attach <id>`) to run there, for
-instance over SSH.
+**Resume** from a remote request never opens a terminal on the machine running vigil. It starts
+the session if it is not running, waits (up to `resume.remote_link_timeout` seconds) for its
+Remote Control link (a live session that has one is joined as it is), and the page goes to that
+link. If no link turns up in time, the page says the session started but its link is pending,
+and to try the session page again in a moment. The answer also carries the attach command (e.g.
+`claude attach 1a2b3c4d`, with the session's 8-character job id) to run on that machine, for
+instance over SSH. See
+[Joining from a phone](#joining-from-a-phone).
 
 **Behind a reverse proxy** (nginx, Caddy and the like), point the proxy at
 `http://127.0.0.1:7787`, have it pass the original `Host` and add that name to
@@ -346,6 +480,29 @@ no proxy headers is indistinguishable from a local client. A TLS proxy should al
 `X-Forwarded-Proto: https`, so the cookie is marked Secure. vigil itself speaks plain HTTP: over
 Tailscale the connection is encrypted already; anywhere else, put an HTTPS proxy in front, or the
 token crosses the network in the clear.
+
+## Joining from a phone
+
+Every session vigil starts gets `--remote-control`, so you can carry on with it in the Claude app
+or at claude.ai from your phone. With [remote access](#remote-access) on, open vigil on the phone:
+
+- **Open** appears on a live session that has a Remote Control link for its current run, and goes
+  straight to it. At the desk the same link is labelled **Open in Claude**.
+- **Resume** from the phone starts the session (if it is not running), waits for its link and
+  opens it. A session that is already live with a link is opened, nothing is started.
+- **Restart with Remote Control** is offered when Resume is refused because the session is running
+  in the background without a link. It is a second step with a warning: restarting stops the
+  session (`claude stop`) and interrupts anything it is doing, and a session that is working
+  right now says so. Only after you confirm does vigil stop it and start it again with
+  `--remote-control`, then open the link as Resume does. A session open in a terminal is never
+  stopped; type `/remote-control` in that terminal to make it joinable.
+- **Started as a copy.** A session that was itself started in the background keeps its own saved
+  options: resumed with flags (`--remote-control` among them), Claude Code starts a copy of it
+  under a new id, with its own transcript, and leaves the original stopped. Restart with Remote
+  Control on such a session therefore always brings back a copy. vigil follows the session that
+  actually started, so the link and the attach command are the copy's, and the page says
+  "Started as a copy (<job id>): this background session keeps its own options." A session that
+  was started in a terminal or with `-p` is resumed under its own id.
 
 ## Peers
 
@@ -376,12 +533,25 @@ what the peer sent; its label and note are edited on the peer itself.
   fetched, and it is tried again after 30 seconds.
 - **Resume** on a peer's session is forwarded to that peer (`POST /sessions/{id}/resume` with its
   token), which starts the session there. Since the request comes from another machine, the peer
-  opens no terminal; the page shows the attach command to run on that machine (over SSH, say).
+  opens no terminal: it answers with the session's Remote Control link (a phone goes to it; at the
+  desk the page shows it) and the attach command to run on that machine (over SSH, say).
+- **Restart with Remote Control**, **Review** and the review suggestions' buttons on a peer's
+  session are forwarded the same way and carried out by the peer, with the peer's own checks.
 - **Tokens.** A peer's token is read from its `token_file` when needed and sent only to that
   peer's `url`, in an `Authorization: Bearer` header. vigil does not follow redirects, and ignores
   proxy settings and `.netrc` for these requests, so the token cannot be passed on to another
-  host. Anyone who can use this vigil (from this machine, or remotely with its token) can browse
-  the peers' sessions and resume them through it.
+  host. Anyone who can use this vigil (from this machine, or remotely with its token) can do
+  through it everything the peers' tokens allow.
+- **What a token allows.** A machine's token lets whoever holds it do on that machine everything
+  its own pages can, so give a peer's token only to a vigil whose users you would let sit at that
+  machine:
+  - **Resume** its sessions.
+  - **Restart with Remote Control**, which stops a background session there with `claude stop`.
+  - **Review** a session, which runs `claude -p` there and spends that machine's Claude usage (up
+    to its `review.max_budget_usd` per review).
+  - **Always use**, which edits `resume.default_flags` in that machine's vigil config file.
+  - **Show change** and **Apply**, which write `CLAUDE.md` or `.claude/settings.json` in that
+    machine's project folders.
 
 Peers do not list each other's peers: each one serves only its own sessions, so two machines may
 list each other. Over plain `http://` the token crosses the network in the clear, which is fine

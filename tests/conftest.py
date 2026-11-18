@@ -9,10 +9,22 @@ from pathlib import Path
 
 import pytest
 
+NO_JOB = "No job matching '{}'. Run 'claude agents' to list running sessions.\n"
+"""What the real `claude attach`, `stop` and `logs` print (to stderr, exiting 1) for an id that
+is not a job id; a fake `claude` does the same (`FakeBin.install`, `tests.test_api`)."""
+JOB_COMMANDS = ("attach", "stop", "logs")
+
 _STUB = """#!{python}
-import json, os, sys
+import json, os, re, sys
 with open({log!r}, "a") as handle:
     handle.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
+# As the real `claude`: attach, stop and logs take the 8-character job id, never a session id.
+job = sys.argv[1:3]
+JOB_COMMANDS, NO_JOB = {job_commands!r}, {no_job!r}
+if os.path.basename(sys.argv[0]) == "claude" and len(job) == 2 and job[0] in JOB_COMMANDS:
+    if not re.fullmatch("[0-9a-f]{{8}}", job[1]):
+        sys.stderr.write(NO_JOB.format(job[1]))
+        sys.exit(1)
 sys.stdout.write({stdout!r})
 sys.exit({exit_code})
 """
@@ -59,11 +71,20 @@ class FakeBin:
         self._logs.mkdir(parents=True, exist_ok=True)
 
     def install(self, name: str, stdout: str = "", exit_code: int = 0) -> Path:
-        """Install an executable `name` that records argv and cwd, prints stdout, exits."""
+        """Install an executable `name` that records argv and cwd, prints stdout, exits. As
+        `claude`, it refuses `attach`, `stop` and `logs` with anything but an 8-character job id,
+        as the real one does (`NO_JOB`)."""
         log = self._logs / f"{name}.jsonl"
         script = self.directory / name
         script.write_text(
-            _STUB.format(python=sys.executable, log=str(log), stdout=stdout, exit_code=exit_code)
+            _STUB.format(
+                python=sys.executable,
+                log=str(log),
+                stdout=stdout,
+                exit_code=exit_code,
+                job_commands=JOB_COMMANDS,
+                no_job=NO_JOB,
+            )
         )
         script.chmod(0o755)
         return script
@@ -97,8 +118,9 @@ from vigil.index.scanner import scan  # noqa: E402
 FIXTURE_TRANSCRIPTS = Path(__file__).parent / "fixtures" / "transcripts"
 FIXTURE_PROJECT_DIR = "-home-user-src-fixture-repo"
 HANDMADE_PROJECT_DIR = "-home-user-src-broken-repo"
-SKIP_REMOTE_FIXTURE = shutil.ignore_patterns("remote-control.jsonl")
-"""For copying the hand-made transcripts: the Remote Control one is only for tests that name it."""
+SKIP_REMOTE_FIXTURE = shutil.ignore_patterns("remote-control.jsonl", "usage.jsonl")
+"""For copying the hand-made transcripts: the Remote Control and usage ones are only for tests that
+name them."""
 
 
 def install_fixture_transcripts(claude_home: Path) -> Path:

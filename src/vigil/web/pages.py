@@ -19,16 +19,30 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from vigil.catalog import current_catalog
 from vigil.commands import resume_command
-from vigil.index.queries import SessionRow, chain, get_session, list_projects, list_sessions
+from vigil.index.queries import (
+    SessionRow,
+    chain,
+    get_session,
+    list_projects,
+    list_sessions,
+    vigil_launch_flags,
+)
 from vigil.peers import (
+    PEER_TIMEOUT,
+    PeerReview,
     PeerSession,
     filter_sessions,
     local_machine,
     newest_first,
+    numbers_from_peer,
+    review_from_dict,
     with_machine,
 )
 from vigil.resume import TERMINAL_ALLOWED
+from vigil.review.numbers import SessionNumbers, compute_numbers, wall_clock
+from vigil.review.store import list_reviews
 from vigil.serialize import apply_status, display_name
 from vigil.usage import build_report, refresh_sources
 from vigil.web import connection, state
@@ -109,6 +123,7 @@ templates.env.globals["session_url"] = session_url
 templates.env.globals["resume_url"] = resume_url
 templates.env.globals["restart_url"] = restart_url
 templates.env.globals["row_key"] = row_key
+templates.env.globals["wall_clock"] = wall_clock
 
 
 def _stale(row: SessionRow) -> bool:
@@ -257,13 +272,28 @@ def sessions_page(
     return _render(request, "sessions.html", context)
 
 
+def _token_numbers(row: SessionRow, flags: list[str]) -> SessionNumbers | None:
+    """The session's token numbers, or None when its transcript cannot be read or holds no usage
+    (the panel is then left out)."""
+    try:
+        numbers = compute_numbers(Path(row.transcript_path), flags)
+    except OSError:
+        return None
+    return numbers if numbers.turns else None
+
+
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
 def session_page(request: Request, session_id: str) -> Any:
-    """Everything indexed about one session, its last exchange, the command that resumes it by
-    hand, its resume chain, and forms to edit its label, note, pin and archive state."""
+    """Everything indexed about one session, its last exchange, where its tokens went (read from
+    the transcript now), its reviews (newest first) with Review this session, the command that
+    resumes it by hand, its resume chain, and forms to edit its label, note, pin and archive
+    state."""
     with connection(request) as conn:
         row = get_session(conn, session_id)
         links = chain(conn, row.chain_id) if row is not None else []
+        flags = vigil_launch_flags(conn, row.session_id) if row is not None else []
+        reviews = list_reviews(conn, row.session_id) if row is not None else []
+        catalog = current_catalog(conn)
     if row is None:
         return _render(request, "session_detail.html", {"row": None, "ident": session_id}, 404)
     web = state(request)
@@ -277,6 +307,11 @@ def session_page(request: Request, session_id: str) -> Any:
         "open_links": open_links([row]),
         "busy": busy_keys([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
+        "numbers": _token_numbers(row, flags),
+        "reviews": reviews,
+        "review_peer": None,
+        "catalog": catalog,
+        "review_budget": web.config.review.max_budget_usd,
     }
     return _render(request, "session_detail.html", context)
 
@@ -284,8 +319,10 @@ def session_page(request: Request, session_id: str) -> Any:
 @router.get("/peers/{peer}/sessions/{session_id}", response_class=HTMLResponse)
 def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
     """A peer's session as the peer last sent it: what it holds, the command that resumes it by
-    hand on that machine, and Resume (forwarded to the peer). Label and note are edited on the
-    peer itself."""
+    hand on that machine, and Resume (forwarded to the peer). Unless the peer is stale, it is
+    also asked now for where the session's tokens went and for its reviews, which are shown with
+    Review this session; reviewing and acting on a suggestion are forwarded to the peer
+    (`vigil.web.review`). Label and note are edited on the peer itself."""
     hub = state(request).peers
     result = hub.results().get(peer) if hub.peer(peer) is not None else None
     row = None
@@ -294,6 +331,28 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
     if result is None or row is None:
         context: dict[str, Any] = {"row": None, "ident": session_id}
         return _render(request, "session_detail.html", context, 404)
+    numbers: SessionNumbers | None = None
+    reviews: list[PeerReview] | None = None
+    reviews_error: str | None = None
+    if not result.stale:
+        ident = quote(row.session_id, safe="")
+        path = f"/api/v1/sessions/{ident}/numbers"
+        status, answer = hub.forward(peer, "GET", path, timeout=PEER_TIMEOUT)
+        numbers = numbers_from_peer(answer) if status == 200 else None
+        path = f"/api/v1/sessions/{ident}/reviews"
+        status, answer = hub.forward(peer, "GET", path, timeout=PEER_TIMEOUT)
+        if status == 200 and isinstance(answer, list):
+            found = (review_from_dict(item, peer) for item in answer)
+            reviews = [review for review in found if review is not None]
+        elif status == 404:
+            # A vigil from before reviews has no such path.
+            reviews = []
+            reviews_error = f"{peer} runs an older vigil without reviews."
+        else:
+            reviews = []
+            reason = answer.get("reason") if isinstance(answer, dict) else None
+            reason = reason if isinstance(reason, str) else f"{peer}: not a list of reviews"
+            reviews_error = f"The reviews could not be read: {reason}"
     context = {
         "row": row,
         "chain": [],
@@ -303,6 +362,10 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         "open_links": open_links([row]),
         "busy": busy_keys([row]),
         "at_desk": TERMINAL_ALLOWED.get(),
+        "numbers": numbers,
+        "reviews": reviews,
+        "reviews_error": reviews_error,
+        "review_peer": peer,
     }
     return _render(request, "session_detail.html", context)
 

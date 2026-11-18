@@ -1,0 +1,21 @@
+{# What a session's numbers (`vigil.review.numbers.SessionNumbers`, as `numbers`) say beyond the
+   totals: models used, wall-clock span, launch flags and the per-turn series. Shared by the
+   session page's "Where the tokens went" and a review's "Numbers the review was given". #}
+<dl>
+  <dt>Models</dt><dd>{{ numbers.models|join(", ") or "-" }}</dd>
+  <dt>Wall-clock span</dt><dd>{{ wall_clock(numbers) or "-" }}</dd>
+  <dt>Launch flags</dt><dd>{{ numbers.launch_flags|join(" ") or "none recorded" }}
+    <span class="muted">flags from launches vigil made; may be incomplete</span></dd>
+</dl>
+{% if numbers.turns %}
+<div class="table-scroll">
+<table class="turns">
+  <thead><tr><th>Turn</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th></tr></thead>
+  <tbody>
+    {% for turn in numbers.turns %}
+    <tr class="tabular-nums"><td>{{ turn.turn }}</td><td>{{ "{:,}".format(turn.input) }}</td><td>{{ "{:,}".format(turn.output) }}</td><td>{{ "{:,}".format(turn.cache_write) }}</td><td>{{ "{:,}".format(turn.cache_read) }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}

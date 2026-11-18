@@ -8,7 +8,7 @@ import sys
 from vigil.claude_cli import capabilities, live_sessions
 from vigil.commands import find_session, open_index
 from vigil.config import Config
-from vigil.resume import ResumePlan, ResumeRefused, execute, plan_resume
+from vigil.resume import ResumePlan, ResumeRefused, copy_note, execute, plan_resume
 
 
 def describe(plan: ResumePlan) -> str:
@@ -48,16 +48,18 @@ class ResumeCommand:
                 if args.print_only:
                     print(describe(plan))
                     return 0
-                attach = execute(plan, conn=conn)
+                launched = execute(plan, conn=conn)
             except ResumeRefused as refused:
                 print(f"vigil: {refused.reason}", file=sys.stderr)
                 return 2
         finally:
             conn.close()
-        if plan.terminal is None:
-            print(f"No terminal available. Attach with: {attach}")
+        if launched.terminal is None:
+            print(f"No terminal available. Attach with: {launched.attach}")
         else:
-            print(f"Opened a terminal. To attach yourself: {attach}")
+            print(f"Opened a terminal. To attach yourself: {launched.attach}")
+        if launched.copy_of is not None and launched.job is not None:
+            print(copy_note(launched.job))
         return 0
 
 
