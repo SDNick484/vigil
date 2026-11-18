@@ -44,8 +44,15 @@
         open.href = link;
         open.textContent = "Open in Claude";
         target.className = "result ok";
-        target.append("Opening Claude: ", open);
-        window.location.href = link;
+        if (data.at_desk === true) {
+          // At the desk (a peer's session, say): show the link and the attach command; go nowhere.
+          var attachAt = document.createElement("code");
+          attachAt.textContent = data.attach || "";
+          target.append(open, "; or attach" + (data.machine ? " on " + data.machine : "") + " with: ", attachAt);
+        } else {
+          target.append("Opening Claude: ", open);
+          window.location.href = link;
+        }
       } else if (data.ok === true && data.pending === true) {
         var page = document.createElement("a");
         var path = new URL(xhr.responseURL).pathname;

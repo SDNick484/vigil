@@ -419,6 +419,7 @@ def test_resume_answer_handler_follows_link_and_offers_restart(web_client: TestC
     for text in (
         "data.remote_url",
         "window.location.href = link",
+        "data.at_desk === true",  # at the desk the link is shown, not followed
         "data.pending",
         "the Remote Control link is not available yet",
         "data.restartable",

@@ -452,6 +452,7 @@ def test_resume_forwarded_to_owner(machines: Machines, monkeypatch: pytest.Monke
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # a link did not turn up within the (short) test wait
+        "at_desk": True,
         "machine": "peer-b",
     }
     # peer-b started it, in its own folder for the session; nothing opened a terminal.
@@ -551,6 +552,32 @@ def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> No
     with pytest.raises(peers.ResumeForwardError) as refused:
         peers.forward_resume(peer, HANDMADE, transport=network.transport())
     assert refused.value.restartable is False
+
+
+def test_forwarded_resume_says_whether_it_was_asked_at_the_desk(machines: Machines) -> None:
+    """The page goes to a peer's Remote Control link only away from the desk: at the desk it
+    shows the link and the attach command instead (`at_desk`)."""
+    link = "https://claude.ai/code/session_PLACEHOLDER01"
+
+    def peer_b(request: httpx.Request) -> httpx.Response:
+        answer = {"ok": True, "attach": "claude attach x", "opened_terminal": False}
+        return httpx.Response(200, json={**answer, "remote_url": link, "at_desk": False})
+
+    machines.network.hosts[PEER_B_HOST] = peer_b
+    for url in (
+        f"/peers/peer-b/sessions/{HANDMADE}/resume",
+        "/peers/peer-b/reviews/1/suggestions/0/resume",
+        "/peers/peer-b/reviews/1/suggestions/0/start-new",
+    ):
+        response = machines.laptop.post(url)
+        assert response.status_code == 200, response.text
+        assert response.json()["remote_url"] == link
+        assert response.json()["at_desk"] is True  # the laptop's own request is a loopback one
+    response = machines.laptop.post(
+        f"/peers/peer-b/sessions/{HANDMADE}/restart-remote", data={"confirm": "yes"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["at_desk"] is True
 
 
 def test_forward_restart(tmp_path: Path) -> None:
@@ -1335,6 +1362,7 @@ def test_forward_suggestion_resume_and_start_new(machines: Machines) -> None:
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # a link did not turn up within the (short) test wait
+        "at_desk": True,
         "machine": "peer-b",
     }
     response = laptop.post(f"{base}/start-new")

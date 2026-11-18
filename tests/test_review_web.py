@@ -381,6 +381,7 @@ def test_suggestion_resume_uses_stored_flag(
         "opened_terminal": False,
         "remote_url": None,
         "pending": False,
+        "at_desk": True,
     }
     assert launched(vigil_env) == [
         (["--bg", "--resume", NAMED, "--remote-control", "--model", "opus"], str(folder))
@@ -478,6 +479,7 @@ def test_start_new_remote_waits_for_link(
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
+        "at_desk": False,
     }
     assert launched(vigil_env) == [
         (

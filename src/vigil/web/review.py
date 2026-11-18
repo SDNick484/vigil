@@ -87,7 +87,15 @@ from vigil.review.runner import (
 from vigil.review.schema import Kind, Suggestion, clean
 from vigil.review.store import get_review, list_reviews, review_to_dict
 from vigil.web import WebState, connection, state
-from vigil.web.api import ForwardedResumeOut, RefusalOut, ResumeOut, _answer, _launch, _start
+from vigil.web.api import (
+    ForwardedResumeOut,
+    RefusalOut,
+    ResumeOut,
+    _answer,
+    _launch,
+    _start,
+    at_desk,
+)
 from vigil.web.pages import _token_numbers, templates
 
 log = logging.getLogger(__name__)
@@ -785,7 +793,7 @@ def _launch_on_peer(
     if not 200 <= status < 300:
         return JSONResponse(answer, status_code=status)  # the peer's refusal, as `forward` made it
     try:
-        return launch_answer(peer, status, answer)
+        return at_desk(launch_answer(peer, status, answer))
     except ResumeForwardError as refused:
         return _refusal(refused.status, refused.reason)
 

@@ -144,13 +144,16 @@ class HealthOut(BaseModel):
 class ResumeOut(BaseModel):
     """`remote_url` is the session's Remote Control link, set for a request from another machine
     (which gets no terminal) once the session has one; `pending` says the session was started for
-    that request but no link had appeared within `resume.remote_link_timeout`."""
+    that request but no link had appeared within `resume.remote_link_timeout`. `at_desk` says the
+    request was made at this machine (loopback): the page shows a link there rather than going
+    to it."""
 
     ok: Literal[True]
     attach: str
     opened_terminal: bool
     remote_url: str | None = None
     pending: bool = False
+    at_desk: bool = False
 
 
 class RefusalOut(BaseModel):
@@ -477,7 +480,14 @@ def _resumed(
         "opened_terminal": plan is not None and plan.terminal is not None,
         "remote_url": link,
         "pending": pending,
+        "at_desk": TERMINAL_ALLOWED.get(),
     }
+
+
+def at_desk(answer: dict[str, object]) -> dict[str, object]:
+    """A peer's launch answer (`vigil.peers.launch_answer`) with `at_desk` set for this request:
+    the peer's own says only whether the peer's request was at the peer's desk."""
+    return {**answer, "at_desk": TERMINAL_ALLOWED.get()}
 
 
 @actions.post(
@@ -494,7 +504,7 @@ def resume_on_peer(
     and 409 refusals come back as they are; 502 when it cannot be reached or refuses the
     request."""
     try:
-        return state(request).peers.resume(peer, session_id)
+        return at_desk(state(request).peers.resume(peer, session_id))
     except ResumeForwardError as refused:
         return _refusal(
             refused.status,
@@ -523,7 +533,7 @@ def restart_on_peer(
     if confirm != "yes":
         return _refusal(400, "restarting needs confirm=yes")
     try:
-        return state(request).peers.restart(peer, session_id)
+        return at_desk(state(request).peers.restart(peer, session_id))
     except ResumeForwardError as refused:
         return _refusal(
             refused.status,

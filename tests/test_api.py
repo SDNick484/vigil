@@ -244,6 +244,7 @@ def test_resume_ok_returns_attach(
         "opened_terminal": False,
         "remote_url": None,
         "pending": False,
+        "at_desk": True,
     }
     started = [c for c in vigil_env.bin.calls("claude") if "--resume" in c.argv]
     assert [(c.argv, c.cwd) for c in started] == [
@@ -269,6 +270,7 @@ def test_resume_opens_terminal_when_there_is_one(
         "opened_terminal": True,
         "remote_url": None,
         "pending": False,
+        "at_desk": True,
     }
 
 
@@ -503,6 +505,7 @@ def test_remote_resume_returns_link(
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
+        "at_desk": False,
     }
     assert started(vigil_env) == [["--bg", "--resume", NAMED, "--remote-control"]]
 
@@ -525,6 +528,7 @@ def test_remote_resume_ignores_older_link(
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,
+        "at_desk": False,
     }
     assert len(started(vigil_env)) == 1  # it did start
 
@@ -553,6 +557,7 @@ def test_second_remote_tap_opens_existing_link(
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
+        "at_desk": False,
     }
     assert started(vigil_env) == []  # nothing was started
 
@@ -629,6 +634,7 @@ def test_restart_remote_returns_link(
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
+        "at_desk": False,
     }
     # Stopped first, then started again with Remote Control, in its folder.
     assert claude_calls(vigil_env) == [
@@ -654,6 +660,7 @@ def test_restart_of_a_session_that_is_already_joinable_stops_nothing(
         "opened_terminal": False,
         "remote_url": LINK,
         "pending": False,
+        "at_desk": False,
     }
     assert claude_calls(vigil_env) == []  # not stopped, not started
 

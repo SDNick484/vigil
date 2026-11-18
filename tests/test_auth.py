@@ -487,6 +487,7 @@ def test_remote_resume_does_not_open_terminal(
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,  # no Remote Control link turned up in the (short) wait
+        "at_desk": False,
     }
     # From the browser, with the cookie: the same.
     log_in(remote)
