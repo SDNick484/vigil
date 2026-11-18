@@ -73,7 +73,7 @@
     <button type="submit">Review this session</button>
     <span class="result" id="review-result" aria-live="polite"></span>
   </form>
-  {% if reviews_error %}<p class="result refused">The reviews could not be read: {{ reviews_error }}</p>{% endif %}
+  {% if reviews_error %}<p class="result refused">{{ reviews_error }}</p>{% endif %}
   <div id="reviews">
     {% for review in reviews %}{% include "_review.html" %}{% endfor %}
   </div>

@@ -1084,6 +1084,31 @@ def test_peer_review_is_cleaned(machines: Machines) -> None:
     assert "peer-c: answered something that is not a review" in response.text
 
 
+def test_peer_session_page_on_an_older_vigil(machines: Machines) -> None:
+    """A peer whose vigil predates reviews answers 404 for them, as FastAPI does for any path
+    it does not have."""
+
+    def peer_c(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/sessions":
+            return httpx.Response(200, json=[canned_session()])
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    machines.network.hosts[PEER_C_HOST] = peer_c
+    page = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}")
+    assert page.status_code == 200, page.text
+    assert "peer-c runs an older vigil without reviews." in page.text
+    assert "Not Found" not in page.text
+
+    # Any other failure still says the reviews could not be read, and why.
+    machines.network.hosts[PEER_C_HOST] = lambda request: (
+        peer_c(request)
+        if request.url.path == "/api/v1/sessions"
+        else httpx.Response(500, json={"detail": "boom"})
+    )
+    page = machines.laptop.get(f"/peers/peer-c/sessions/{C_SESSION}")
+    assert "The reviews could not be read: peer-c: " in page.text
+
+
 def test_peer_session_page_shows_token_numbers(machines: Machines) -> None:
     usage = FIXTURE_TRANSCRIPTS / "handmade" / "usage.jsonl"
     set_peer_b(

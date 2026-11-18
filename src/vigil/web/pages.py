@@ -344,10 +344,15 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
         if status == 200 and isinstance(answer, list):
             found = (review_from_dict(item, peer) for item in answer)
             reviews = [review for review in found if review is not None]
+        elif status == 404:
+            # A vigil from before reviews has no such path.
+            reviews = []
+            reviews_error = f"{peer} runs an older vigil without reviews."
         else:
             reviews = []
             reason = answer.get("reason") if isinstance(answer, dict) else None
-            reviews_error = reason if isinstance(reason, str) else f"{peer}: not a list of reviews"
+            reason = reason if isinstance(reason, str) else f"{peer}: not a list of reviews"
+            reviews_error = f"The reviews could not be read: {reason}"
     context = {
         "row": row,
         "chain": [],
