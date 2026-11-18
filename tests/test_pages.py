@@ -6,9 +6,12 @@ from fastapi.testclient import TestClient
 from markupsafe import escape
 
 from tests.conftest import VigilEnv
+from vigil.claude_cli import Capabilities, LiveSession
 from vigil.index.db import connect
-from vigil.index.queries import get_session
+from vigil.index.queries import SessionRow, get_session
 from vigil.index.scanner import link_chains
+from vigil.peers import PeerSession
+from vigil.web.pages import StatusCounts, count_statuses, group_by_project, split_groups
 
 NAMED = "e47d2def-0bb3-4d50-9f9c-8e38e4cdcfba"  # titled "fixture-named", in fixture-repo
 PLAIN = "7fb815ab-28b5-4123-85d0-64e6fd3b4141"
@@ -16,36 +19,32 @@ FORKED = "68e04fa1-b95c-4610-8221-261395d0ca5d"
 HANDMADE = "11111111-1111-4111-8111-111111111111"  # the only session in broken-repo
 
 HX = {"HX-Request": "true"}
+CAPS = Capabilities(version="2.1.312", has_bg=True, has_attach=True, has_agents_json=True)
 ARCHIVE = "INSERT INTO session_meta (session_id, archived, updated_at) VALUES (?, 1, '')"
 
 
 class Rows(HTMLParser):
-    """The project headings (the link in each `<h2>`) and the ids of the session rows, in page
-    order."""
+    """The project labels (the element with class `label` in each project summary) and the ids of
+    the session rows, in page order."""
 
     def __init__(self) -> None:
         super().__init__()
         self.sequence: list[tuple[str, str]] = []
-        self._in_h2 = False
-        self._in_link = False
+        self._in_label = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
-        if tag == "h2":
-            self._in_h2 = True
-        if tag == "a":
-            self._in_link = True
-        if tag == "tr" and (attributes.get("id") or "").startswith("row-"):
+        if "label" in (attributes.get("class") or "").split():
+            self._in_label = True
+        if tag == "li" and (attributes.get("id") or "").startswith("row-"):
             self.sequence.append(("row", (attributes["id"] or "")[4:]))
 
     def handle_endtag(self, tag: str) -> None:
-        if tag == "h2":
-            self._in_h2 = False
-        if tag == "a":
-            self._in_link = False
+        if tag == "span":
+            self._in_label = False
 
     def handle_data(self, data: str) -> None:
-        if self._in_h2 and self._in_link and data.strip():
+        if self._in_label and data.strip():
             self.sequence.append(("project", data.strip()))
 
 
@@ -53,6 +52,12 @@ def parse(html: str) -> list[tuple[str, str]]:
     rows = Rows()
     rows.feed(html)
     return rows.sequence
+
+
+def row_html(page: str, row_id: str) -> str:
+    match = re.search(rf'<li [^>]*id="{re.escape(row_id)}".*?</li>', page, re.S)
+    assert match, f"no row {row_id}"
+    return match.group(0)
 
 
 def row_ids(html: str) -> list[str]:
@@ -113,7 +118,7 @@ def test_search_filters_rows(web_client: TestClient) -> None:
     assert response.status_code == 200
     assert "<html" not in response.text  # just the results, for htmx to swap in
     assert row_ids(response.text) == [NAMED]
-    assert "1 session" in response.text
+    assert "across 1 project" in response.text and "<strong>1</strong> idle" in response.text
 
     nothing = web_client.get("/", params={"q": "nothing-matches"}, headers=HX)
     assert row_ids(nothing.text) == []
@@ -177,12 +182,11 @@ def test_resume_button_shows_refusal_text(vigil_env: VigilEnv, web_client: TestC
     """What a click does: htmx posts the form to the resume endpoint and the page's handler shows
     the reason from the 409 in the row's result element."""
     page = web_client.get("/").text
-    row = re.search(rf'<tr[^>]*id="row-{NAMED}".*?</tr>', page, re.S)
-    assert row is not None
-    post = re.search(r'hx-post="([^"]+)"', row.group(0))
-    target = re.search(r'hx-target="#([^"]+)"', row.group(0))
+    row = row_html(page, f"row-{NAMED}")
+    post = re.search(r'hx-post="([^"]+)"', row)
+    target = re.search(r'hx-target="#([^"]+)"', row)
     assert post is not None and target is not None
-    assert f'id="{target.group(1)}"' in row.group(0)
+    assert f'id="{target.group(1)}"' in row
 
     # No claude on PATH: the session's folder does not exist here either, so resume refuses.
     response = web_client.post(post.group(1))
@@ -237,3 +241,147 @@ def test_static_files_served_and_contained(web_client: TestClient) -> None:
     assert web_client.get("/static/missing.css").status_code == 404
     assert web_client.get("/static/%2e%2e/pages.py").status_code == 404
     assert web_client.get("/static/../pages.py").status_code == 404
+
+
+def make_row(project: str, status: str, session_id: str, **fields: object) -> SessionRow:
+    return SessionRow(
+        session_id=session_id,
+        cwd=f"/home/user/src/{project}",
+        git_branch=None,
+        version=None,
+        title=None,
+        first_prompt=None,
+        last_user=None,
+        last_assistant=None,
+        started_at=None,
+        last_activity_at=None,
+        message_count=1,
+        previous_session_id=None,
+        machine="laptop",
+        project_key=f"/home/user/src/{project}",
+        project_label=project,
+        chain_id=session_id,
+        transcript_path="/nonexistent",
+        status=status,  # type: ignore[arg-type]
+        **fields,  # type: ignore[arg-type]
+    )
+
+
+def make_live(client: TestClient, sessions: dict[str, str]) -> None:
+    """Make the service see `sessions` (ID to `background` or `interactive`) as live."""
+    live = {i: LiveSession(i, kind, None, None) for i, kind in sessions.items()}  # type: ignore[arg-type]
+    client.app.state.vigil.live.get = lambda **_: (CAPS, live)  # type: ignore[attr-defined]
+
+
+def test_split_groups_active_first() -> None:
+    rows = [
+        make_row("a", "idle", "a1"),
+        make_row("b", "idle", "b1"),
+        make_row("a", "background", "a2"),
+        make_row("c", "running", "c1"),
+        make_row("b", "idle", "b2"),
+    ]
+    groups = group_by_project(rows)
+    assert [g.label for g in groups] == ["a", "b", "c"]
+    assert [(g.active, g.idle_count) for g in groups] == [(True, 1), (False, 2), (True, 0)]
+    active, quiet = split_groups(groups)
+    assert [g.label for g in active] == ["a", "c"]
+    assert [g.label for g in quiet] == ["b"]
+
+
+def test_stale_peer_session_is_quiet() -> None:
+    stale = PeerSession(**make_row("a", "running", "a1").__dict__, peer="peer-b", stale=True)
+    (group,) = group_by_project([stale])
+    assert not group.active and group.idle_count == 1
+    assert count_statuses([stale]) == StatusCounts(0, 0, 1, 1)
+
+
+def test_count_statuses() -> None:
+    rows = [
+        make_row("a", "running", "a1"),
+        make_row("a", "running", "a2"),
+        make_row("b", "background", "b1"),
+        make_row("b", "idle", "b2"),
+        make_row("b", "idle", "b3"),
+        make_row("c", "idle", "c1"),
+        make_row("c", "unknown", "c2"),
+    ]
+    assert count_statuses(rows) == StatusCounts(2, 1, 4, 3)
+
+
+def test_sessions_page_active_open_quiet_closed(
+    vigil_env: VigilEnv, web_client: TestClient
+) -> None:
+    # Archive all but two of fixture-repo's sessions: the live one and one idle one.
+    sql(
+        vigil_env,
+        "INSERT INTO session_meta (session_id, archived, updated_at) "
+        "SELECT session_id, 1, '' FROM sessions WHERE session_id NOT IN (?, ?, ?)",
+        NAMED,
+        PLAIN,
+        HANDMADE,
+    )
+    make_live(web_client, {NAMED: "background"})
+    page = web_client.get("/").text
+    assert page.count('<details class="project" open>') == 1
+    assert page.count('<details class="project">') == 1
+    active_at = page.index('<details class="project" open>')
+    quiet_at = page.index('<details class="project">')
+    assert active_at < quiet_at
+    assert "fixture-repo" in page[active_at:quiet_at] and "broken-repo" in page[quiet_at:]
+    assert "Active now" in page[:active_at] and "Quiet" in page[active_at:quiet_at]
+
+    # Only the active project's idle row folds; the quiet project's row does not.
+    assert 'class="session folded"' in row_html(page, f"row-{PLAIN}")
+    assert "folded" not in row_html(page, f"row-{NAMED}")
+    assert "folded" not in row_html(page, f"row-{HANDMADE}")
+    assert page.count('class="more"') == 1
+    assert "Show 1 idle session</button>" in page
+    assert "1 session" in page[quiet_at:]  # the quiet project's one-line summary
+
+
+def test_idle_fold_pluralises(web_client: TestClient) -> None:
+    make_live(web_client, {NAMED: "interactive"})
+    page = web_client.get("/").text
+    idle = [i for i in row_ids(page) if i not in (NAMED, HANDMADE)]
+    assert len(idle) > 1
+    assert f"Show {len(idle)} idle sessions</button>" in page
+
+
+def test_search_opens_matching_projects(web_client: TestClient) -> None:
+    # Nothing is live, so fixture-repo is a quiet project; a search opens it all the same.
+    quiet = web_client.get("/").text
+    assert '<details class="project">' in quiet and '<details class="project" open>' not in quiet
+    page = web_client.get("/", params={"q": "fixture"}).text
+    assert page.count('<details class="project" open>') == 1  # broken-repo has no match
+    assert '<details class="project">' not in page
+    assert len(row_ids(page)) > 1
+
+    # An active project opens with every session unfolded.
+    make_live(web_client, {NAMED: "background"})
+    folded = web_client.get("/").text
+    assert re.search(r'class="[^"]*\bfolded\b', folded) and 'class="more"' in folded
+    page = web_client.get("/", params={"q": "fixture"}).text
+    assert not re.search(r'class="[^"]*\bfolded\b', page) and 'class="more"' not in page
+
+
+def test_only_this_project_link(web_client: TestClient) -> None:
+    key = "/home/user/src/broken-repo"
+    page = web_client.get("/").text
+    assert 'href="/?project=/home/user/src/broken-repo">Only this project</a>' in page
+    # It sits in the card body, not in the summary, so tapping the summary still toggles.
+    card = page[page.index("broken-repo</span>") :]
+    assert card.index("</summary>") < card.index("Only this project")
+    filtered = web_client.get("/", params={"project": key}).text
+    assert "Only this project" not in filtered and "show all" in filtered
+
+
+def test_summary_line(web_client: TestClient) -> None:
+    make_live(web_client, {NAMED: "background", FORKED: "interactive", PLAIN: "interactive"})
+    page = web_client.get("/").text
+    total = len(row_ids(page))
+    assert "<strong>2</strong> running" in page
+    assert "<strong>1</strong> background" in page
+    assert f"<strong>{total - 3}</strong> idle" in page
+    assert "across 2 projects" in page
+    assert "Quiet" in page  # broken-repo

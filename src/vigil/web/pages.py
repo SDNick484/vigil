@@ -82,6 +82,16 @@ templates.env.globals["session_url"] = session_url
 templates.env.globals["resume_url"] = resume_url
 
 
+def is_active(row: SessionRow) -> bool:
+    """Whether `row` is running or in the background right now. A stale peer row is what the peer
+    last sent, not what is happening, so it is never active."""
+    stale = isinstance(row, PeerSession) and row.stale
+    return row.status in ("running", "background") and not stale
+
+
+templates.env.globals["is_active"] = is_active
+
+
 @dataclass(frozen=True)
 class ProjectGroup:
     """The sessions of one project, in the order they were listed (newest activity first)."""
@@ -89,18 +99,64 @@ class ProjectGroup:
     key: str
     label: str
     sessions: list[SessionRow]
+    active: bool = False
+    """Some session is running or in the background (and not stale)."""
+    idle_count: int = 0
+    """How many of the sessions are not active."""
+
+    @property
+    def running(self) -> int:
+        return sum(1 for s in self.sessions if is_active(s) and s.status == "running")
+
+    @property
+    def background(self) -> int:
+        return sum(1 for s in self.sessions if is_active(s) and s.status == "background")
+
+
+@dataclass(frozen=True)
+class StatusCounts:
+    """What the sessions page's summary line shows. `idle` is every session that is not active,
+    `unknown` ones included."""
+
+    running: int
+    background: int
+    idle: int
+    projects: int
 
 
 def group_by_project(rows: list[SessionRow]) -> list[ProjectGroup]:
     """`rows` grouped by project; groups are ordered by their newest session, which comes first
     in `rows`."""
-    groups: dict[str, ProjectGroup] = {}
+    grouped: dict[str, list[SessionRow]] = {}
     for row in rows:
-        group = groups.setdefault(
-            row.project_key, ProjectGroup(row.project_key, row.project_label, [])
+        grouped.setdefault(row.project_key, []).append(row)
+    return [
+        ProjectGroup(
+            key,
+            sessions[0].project_label,
+            sessions,
+            active=any(is_active(s) for s in sessions),
+            idle_count=sum(1 for s in sessions if not is_active(s)),
         )
-        group.sessions.append(row)
-    return list(groups.values())
+        for key, sessions in grouped.items()
+    ]
+
+
+def split_groups(groups: list[ProjectGroup]) -> tuple[list[ProjectGroup], list[ProjectGroup]]:
+    """`groups` as `(active, quiet)`, each in the order given."""
+    return [g for g in groups if g.active], [g for g in groups if not g.active]
+
+
+def count_statuses(rows: list[SessionRow]) -> StatusCounts:
+    """The running, background and idle sessions in `rows`, and how many projects they span."""
+    running = sum(1 for r in rows if is_active(r) and r.status == "running")
+    background = sum(1 for r in rows if is_active(r) and r.status == "background")
+    return StatusCounts(
+        running,
+        background,
+        len(rows) - running - background,
+        len({r.project_key for r in rows}),
+    )
 
 
 def _render(request: Request, name: str, context: dict[str, Any], status_code: int = 200) -> Any:
@@ -142,8 +198,14 @@ def sessions_page(
             if result.error is not None:
                 offline.append((name, result.fetched_at, result.error))
         rows = newest_first(merged)[:LIST_LIMIT]
+    groups = group_by_project(rows)
+    active, quiet = split_groups(groups)
     context = {
-        "groups": group_by_project(rows),
+        "groups": groups,
+        "active": active,
+        "quiet": quiet,
+        "counts": count_statuses(rows),
+        "searching": bool(q),
         "count": len(rows),
         "q": q,
         "project": project,

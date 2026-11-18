@@ -48,5 +48,18 @@
       }
     });
   </script>
+  <script>
+    // "Show N idle sessions" unfolds the idle sessions of an active project. Delegated from the
+    // document so it keeps working after the live search swaps the results.
+    document.addEventListener("click", function (event) {
+      var button = event.target instanceof Element ? event.target.closest("button.more") : null;
+      if (!button) return;
+      var project = button.closest("details.project");
+      if (!project) return;
+      var open = project.classList.toggle("unfolded");
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+      button.textContent = open ? "Hide idle sessions" : button.dataset.label;
+    });
+  </script>
 </body>
 </html>

@@ -56,7 +56,7 @@ input[type="search"], input[type="text"], textarea {
   background: var(--bg);
   color: inherit;
 }
-input[type="search"] { flex: 1 1 20rem; }
+input[type="search"] { flex: 1 1 100%; min-height: 2.5rem; }
 button {
   font: inherit;
   padding: 0.3rem 0.8rem;
@@ -69,10 +69,7 @@ button {
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { font-size: 0.8rem; text-transform: uppercase; color: var(--muted); }
-td.actions { white-space: nowrap; }
-td.actions form { display: inline; }
-tr.archived { opacity: 0.6; }
-tr.stale { opacity: 0.6; }
+li.archived, li.stale { opacity: 0.6; }
 .badge.stale { color: var(--bad); border-color: var(--bad); }
 .note { color: var(--muted); font-size: 0.875rem; }
 .badge, .status {
@@ -92,6 +89,95 @@ dd { margin: 0; overflow-wrap: anywhere; }
 form.meta { display: grid; gap: 0.5rem; max-width: 36rem; }
 form.meta label { display: grid; gap: 0.15rem; }
 form.meta label:has(input[type="checkbox"]) { display: block; }
-@media (max-width: 40rem) {
-  th:nth-child(2), td:nth-child(2) { display: none; }
+
+/* The sessions page: a summary line, then project cards, each a <details>. */
+.summary { margin: 0.75rem 0; }
+.summary .muted { margin-left: 0.25rem; }
+.dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  margin: 0 0.3rem 0 0.75rem;
+  border-radius: 50%;
+  border: 2px solid transparent;
 }
+.summary .dot:first-child { margin-left: 0; }
+.dot-running { background: var(--ok); border-color: var(--ok); }
+.dot-background { border-color: var(--ok); }
+.dot-idle { background: var(--muted); border-color: var(--muted); }
+.section-label {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+details.project {
+  margin: 0 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+details.project > summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  list-style: none;
+}
+details.project > summary::-webkit-details-marker { display: none; }
+details.project .marker { color: var(--muted); transition: transform 0.15s; }
+details.project[open] .marker { transform: rotate(90deg); }
+details.project .label { font-weight: 700; overflow-wrap: anywhere; }
+details.project .when { color: var(--muted); font-size: 0.875rem; text-align: right; }
+details.project .when .status { margin-left: 0.25rem; }
+details.project .path {
+  grid-column: 2 / -1;
+  background: none;
+  padding: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+ul.sessions { list-style: none; margin: 0; padding: 0; }
+li.session {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: 0.75rem;
+  align-items: center;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--line);
+}
+li.session .name { grid-column: 1; overflow-wrap: anywhere; }
+li.session .meta {
+  grid-column: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+li.session .actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: 0.5rem; }
+li.session .actions form { display: inline; }
+li.session .actions button, button.more { min-height: 2.5rem; }
+li.session .note { margin-left: 0.5rem; }
+li.session.folded { display: none; }
+details.project.unfolded li.session.folded { display: grid; }
+button.more {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-top: 1px dashed var(--line);
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+}
+details.project .only { margin: 0; padding: 0 0.75rem; font-size: 0.8rem; }
+details.project .only a { display: inline-flex; align-items: center; min-height: 2.5rem; }
+li.session .name a { display: inline-flex; align-items: center; min-height: 2.5rem; }
+form.search button { min-height: 2.5rem; }
+form.search label { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 2.5rem; }

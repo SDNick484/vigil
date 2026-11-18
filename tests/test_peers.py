@@ -214,13 +214,13 @@ def machines(vigil_env: VigilEnv, tmp_path: Path) -> Iterator[Machines]:
 
 
 def row_html(page: str, row_id: str) -> str:
-    match = re.search(rf'<tr [^>]*id="{re.escape(row_id)}".*?</tr>', page, re.S)
+    match = re.search(rf'<li [^>]*id="{re.escape(row_id)}".*?</li>', page, re.S)
     assert match, f"no row {row_id}"
     return match.group(0)
 
 
 def machine_cell(row: str) -> str:
-    match = re.search(r'<td class="machine">([^<]*)</td>', row)
+    match = re.search(r'<span class="machine">([^<]*)</span>', row)
     assert match, row
     return match.group(1)
 
@@ -228,10 +228,9 @@ def machine_cell(row: str) -> str:
 # --- the merged list ----------------------------------------------------------------------------
 
 
-def test_merged_list_has_machine_column(machines: Machines) -> None:
+def test_merged_list_shows_machine_in_rows(machines: Machines) -> None:
     laptop = machines.laptop
     page = laptop.get("/").text
-    assert "<th>Machine</th>" in page
     local = row_html(page, f"row-{NAMED}")
     assert machine_cell(local) == "laptop"
     assert f'href="/sessions/{NAMED}"' in local

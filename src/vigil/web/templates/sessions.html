@@ -13,39 +13,59 @@
 </form>
 <div id="results">
 {% block results %}
-  <p class="muted">
-    {{ count }} session{{ "" if count == 1 else "s" }}
-    {%- if project %}, in one project (<a href="/">show all</a>){% endif %}
+{% macro project_card(group, open_it) %}
+<details class="project"{% if open_it %} open{% endif %}>
+  <summary>
+    <span class="marker" aria-hidden="true">▸</span>
+    <span class="label">{{ group.label }}</span>
+    <span class="when">
+      {% if group.active %}
+        {% if group.running %}<span class="status status-running">{{ group.running }} running</span>{% endif %}
+        {% if group.background %}<span class="status status-background">{{ group.background }} background</span>{% endif %}
+      {% else %}
+        {{ group.sessions|length }} session{{ "" if group.sessions|length == 1 else "s" }}
+        {%- if group.sessions[0].last_activity_at %} · <time datetime="{{ group.sessions[0].last_activity_at.isoformat() }}">{{ group.sessions[0].last_activity_at|when }}</time>{% endif %}
+      {% endif %}
+    </span>
+    <code class="path">{{ group.key }}</code>
+  </summary>
+  {% if group.key != project %}
+  <p class="only"><a href="/?project={{ group.key|urlencode }}">Only this project</a></p>
+  {% endif %}
+  <ul class="sessions">
+    {% for s in group.sessions %}
+    {% set folded = group.active and not searching and not is_active(s) %}
+    {% include "_session_row.html" %}
+    {% endfor %}
+  </ul>
+  {% if group.active and not searching and group.idle_count %}
+  {% set label = "Show %d idle session%s"|format(group.idle_count, "" if group.idle_count == 1 else "s") %}
+  <button type="button" class="more" data-label="{{ label }}" aria-expanded="false">{{ label }}</button>
+  {% endif %}
+</details>
+{% endmacro %}
+  <p class="summary">
+    <span class="dot dot-running" aria-hidden="true"></span><strong>{{ counts.running }}</strong> running
+    <span class="dot dot-background" aria-hidden="true"></span><strong>{{ counts.background }}</strong> background
+    <span class="dot dot-idle" aria-hidden="true"></span><strong>{{ counts.idle }}</strong> idle
+    <span class="muted">across {{ counts.projects }} project{{ "" if counts.projects == 1 else "s" }}
+    {%- if project %} (<a href="/">show all</a>){% endif %}</span>
   </p>
   {% for name, fetched_at, error in offline %}
   <p class="result refused peer-offline">{{ name }} cannot be reached ({{ error }}).
     {% if fetched_at %}Its sessions as of {{ fetched_at|when }} are shown, marked stale.{% else %}None of its sessions are known yet.{% endif %}</p>
   {% endfor %}
-  {% for group in groups %}
-  <section class="project">
-    <h2><a href="/?project={{ group.key|urlencode }}">{{ group.label }}</a>
-      <small class="muted">{{ group.key }}</small></h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Session</th>
-          <th>Branch</th>
-          <th>Last activity</th>
-          <th>Status</th>
-          {% if machines %}<th>Machine</th>{% endif %}
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for s in group.sessions %}
-        {% include "_session_row.html" %}
-        {% endfor %}
-      </tbody>
-    </table>
-  </section>
-  {% else %}
+  {% if active %}
+  <h2 class="section-label">Active now</h2>
+  {% for group in active %}{{ project_card(group, true) }}{% endfor %}
+  {% endif %}
+  {% if quiet %}
+  <h2 class="section-label">Quiet</h2>
+  {% for group in quiet %}{{ project_card(group, searching) }}{% endfor %}
+  {% endif %}
+  {% if not groups %}
   <p>No sessions match.</p>
-  {% endfor %}
+  {% endif %}
 {% endblock %}
 </div>
 {% endblock %}
