@@ -148,9 +148,10 @@ class ResumeOut(BaseModel):
     (which gets no terminal) once the session has one; `pending` says the session was started for
     that request but no link had appeared within `resume.remote_link_timeout`. `at_desk` says the
     request was made at this machine (loopback): the page shows a link there rather than going
-    to it. `copy_of` and `session_id` are only there when `claude --bg` started a copy of the
-    session asked for (`copy_of`) under a new id (`session_id`), as it does for a session that
-    was itself started in the background: that session keeps its own options."""
+    to it. `copy_of` is only there when `claude --bg` started a copy of the session asked for
+    (`copy_of`) under a new id (`session_id`, when it could be found; else `attach` names the
+    copy by its job id), as it does for a session that was itself started in the background:
+    that session keeps its own options."""
 
     ok: Literal[True]
     attach: str
@@ -487,7 +488,8 @@ def restart_remote(
 
 
 def _resumed(launched: Launched, link: str | None, *, pending: bool = False) -> dict[str, object]:
-    """A resume's answer (`ResumeOut`): with `copy_of` and `session_id` only for a copy."""
+    """A resume's answer (`ResumeOut`): with `copy_of` only for a copy, and `session_id` too when
+    the copy's full id is known."""
     answer: dict[str, object] = {
         "ok": True,
         "attach": launched.attach,
@@ -496,8 +498,10 @@ def _resumed(launched: Launched, link: str | None, *, pending: bool = False) -> 
         "pending": pending,
         "at_desk": TERMINAL_ALLOWED.get(),
     }
-    if launched.copy_of is not None and launched.session_id is not None:
-        answer.update(copy_of=launched.copy_of, session_id=launched.session_id)
+    if launched.copy_of is not None:
+        answer["copy_of"] = launched.copy_of
+        if launched.session_id is not None:
+            answer["session_id"] = launched.session_id
     return answer
 
 

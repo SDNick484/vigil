@@ -27,7 +27,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Literal
 
-from vigil.claude_cli import Capabilities, LiveSession, started_session
+from vigil.claude_cli import (
+    SESSION_ID,
+    Capabilities,
+    LiveSession,
+    background_job,
+    started_session,
+)
 from vigil.config import ResumeConfig
 from vigil.flags import FlagRefused, check, merge
 from vigil.index.queries import SessionRow, record_launch
@@ -36,9 +42,8 @@ from vigil.transcript import find_remote_url
 
 log = logging.getLogger(__name__)
 
-# Session IDs are UUIDs; anything else (a leading "-" in particular) is refused rather than passed
-# to `claude` or `tmux`, where it could read as an option or a tmux target pattern.
-SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+JOB_ID = re.compile(r"[0-9a-f]{8}")
+"""A job id, as `claude --bg` prints it and `claude attach` takes it."""
 
 _START_TIMEOUT = 20.0
 """How long `execute` waits for `claude --bg` / `tmux new-session -d` to return. Both return as
@@ -108,10 +113,17 @@ class Launched:
     """argv of the terminal opened on the session (or tried); None when none was."""
     session_id: str | None
     """The session now running: the one `claude --bg` said it started, else the planned one;
-    None when the id of a new background session could not be found."""
+    None when its full id could not be found (a new session, or a copy known by its job id)."""
     copy_of: str | None = None
     """The session asked for, when `claude --bg --resume` started a copy of it under
-    `session_id` instead (a background session keeps its own options)."""
+    `session_id` instead (a background session keeps its own options; `session_id` is None
+    when only the copy's job id is known)."""
+
+    @property
+    def job(self) -> str | None:
+        """The job id `attach` attaches to, when it is `claude attach <job id>`."""
+        parts = self.attach.split()
+        return parts[2] if len(parts) == 3 and parts[:2] == ["claude", "attach"] else None
 
 
 def short_id(session_id: str) -> str:
@@ -448,28 +460,32 @@ def execute(plan: ResumePlan, *, conn: sqlite3.Connection | None = None) -> Laun
 
     After a `claude --bg` start, the session that runs is the one it says it started
     (`vigil.claude_cli.started_session`): a copy of the resumed session, or a new session's
-    own id. The attach command and terminal are for that session. When it cannot be told, a
-    resume carries on with the planned session; a new session gets no terminal, and the attach
-    command lists the sessions.
+    own id. The attach command and terminal are for that session. When it printed another job
+    id than the planned session's but that session's full id cannot be found, they are for that
+    job, and the session id is unknown (None). When it printed no job id, or the planned
+    session's, a resume carries on with the planned session; a new session gets no terminal,
+    and the attach command lists the sessions.
 
     With `conn`, each `claude` invocation vigil makes is recorded with `record_launch` (flag
     names only), under the session that runs.
     """
-    session_id = plan.session_id
+    session_id, job = plan.session_id, None
     if plan.start is not None:
         output = _start(plan, plan.start)
         if plan.method == "bg":
-            session_id = started_session(output, plan.start_cwd) or plan.session_id
+            session_id, job = _started(plan, output)
         if conn is not None:
             _record(conn, session_id, None, _claude_argv(plan, plan.start))
 
     attach, opens = plan.attach, plan.terminal
-    if session_id is None:
-        opens = None  # a new background session that cannot be found
-    elif session_id != plan.session_id:
+    if session_id is not None and session_id != plan.session_id:
         attach = attach_argv(session_id)
-        if opens is not None and plan.terminal_for is not None:
-            opens = plan.terminal_for(attach)
+    elif session_id is None and job is not None:
+        attach = ["claude", "attach", job]
+    elif session_id is None:
+        opens = None  # a new background session that cannot be found
+    if attach != plan.attach and opens is not None and plan.terminal_for is not None:
+        opens = plan.terminal_for(attach)
 
     if opens is not None:
         try:
@@ -483,6 +499,21 @@ def execute(plan: ResumePlan, *, conn: sqlite3.Connection | None = None) -> Laun
                 _record(conn, session_id, "attach", attach)
     copy_of = plan.session_id if session_id != plan.session_id else None
     return Launched(shlex.join(attach), opens, session_id, copy_of)
+
+
+def _started(plan: ResumePlan, output: str) -> tuple[str | None, str | None]:
+    """The session a `claude --bg` start of `plan` that printed `output` runs, and its job id
+    when only that is known: (full id, None) when it can be found; (None, job) when the job it
+    printed is not the planned session's and its full id cannot be found; else the planned
+    session (None for a new one)."""
+    found = started_session(output, plan.start_cwd)
+    if found is not None:
+        return found, None
+    job = background_job(output)
+    planned = short_id(plan.session_id) if plan.session_id is not None else None
+    if job is not None and JOB_ID.fullmatch(job) and job != planned:
+        return None, job
+    return plan.session_id, None
 
 
 def stop_session(

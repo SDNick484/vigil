@@ -475,13 +475,45 @@ def test_start_new_at_the_desk(
     assert launched(vigil_env) == [(["--bg", "--remote-control", "--model", "opus"], str(folder))]
 
 
-def test_start_new_whose_session_cannot_be_found_is_pending(
+def test_start_new_whose_full_id_cannot_be_found_attaches_by_job_id(
     vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = tmp_path / "work"
     folder.mkdir()
     set_cwd(vigil_env, folder)
     install_claude(vigil_env, transcript=tmp_path / "unused.jsonl", link=None, listed=False)
+    vigil_env.bin.install("xterm")
+    monkeypatch.setenv("DISPLAY", ":99")
+    review_id = flag_review(vigil_env, flag_card("--model", "opus"))
+    response = web_client.post(f"/reviews/{review_id}/suggestions/0/start-new")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "attach": f"claude attach {NEW_BG[:8]}",
+        "opened_terminal": True,
+        "remote_url": None,
+        "pending": True,
+        "at_desk": True,
+    }
+    [xterm] = wait_for_xterm(vigil_env)
+    assert xterm.argv == ["-e", "claude", "attach", NEW_BG[:8]]
+
+
+def wait_for_xterm(env: VigilEnv) -> list[Any]:
+    """The terminal is started detached and not waited for; give the fake a moment to log."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not env.bin.calls("xterm"):
+        time.sleep(0.02)
+    return env.bin.calls("xterm")
+
+
+def test_start_new_whose_session_cannot_be_told_is_pending(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    set_cwd(vigil_env, folder)
+    vigil_env.bin.install("claude", stdout=CLAUDE_BG)  # prints no job id when started
     vigil_env.bin.install("xterm")
     monkeypatch.setenv("DISPLAY", ":99")
     review_id = flag_review(vigil_env, flag_card("--model", "opus"))

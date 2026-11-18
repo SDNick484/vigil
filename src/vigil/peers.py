@@ -383,8 +383,9 @@ def forward_resume(
 
     Returns `{"ok": True, "attach", "opened_terminal", "remote_url", "pending", "machine"}`
     (`remote_url` is the peer's Remote Control link when it is a Claude one, else None; `pending`
-    says it started the session but the link is not there yet), with the peer's `copy_of` and
-    `session_id` when it started a copy of the session (both session ids, else left out).
+    says it started the session but the link is not there yet), with the peer's `copy_of` (and
+    `session_id`, when it has it) when it started a copy of the session, each only when it is a
+    session id.
     Raises ResumeForwardError: 404 for an id that is not a session id, the peer's own 404 or 409
     refusal (reason prefixed with the peer's name), else 502 when the peer cannot be reached or
     refuses the request."""
@@ -447,13 +448,10 @@ def launch_answer(name: str, status: int, data: Answer) -> dict[str, object]:
         "machine": name,
     }
     copy_of, session_id = data.get("copy_of"), data.get("session_id")
-    if (
-        isinstance(copy_of, str)
-        and isinstance(session_id, str)
-        and is_session_id(copy_of)
-        and is_session_id(session_id)
-    ):
-        answer.update(copy_of=copy_of, session_id=session_id)
+    if isinstance(copy_of, str) and is_session_id(copy_of):
+        answer["copy_of"] = copy_of
+        if isinstance(session_id, str) and is_session_id(session_id):
+            answer["session_id"] = session_id
     return answer
 
 

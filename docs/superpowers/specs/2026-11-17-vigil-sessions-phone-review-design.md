@@ -136,8 +136,11 @@ it.
   started from what `claude --bg` prints (`backgrounded · <job id>`) and `claude agents --json`
   (the session whose id starts with that job id, in the same folder); it may be a copy (see the
   facts above), and then the answer says so (`copy_of`, `session_id`) and the page says
-  "Started as a copy (<job id>): this background session keeps its own options." If it cannot
-  tell, it carries on with the id it asked for. It then waits up to 30 s
+  "Started as a copy (<job id>): this background session keeps its own options." When it
+  printed another job id but that session cannot be found (not listed yet, listed in another
+  folder), vigil attaches by that job id, leaves `session_id` out and answers pending (it has no
+  transcript to wait on). Only when it printed no job id, or the requested session's, does it
+  carry on with the id it asked for. It then waits up to 30 s
   (my call; configurable `resume.remote_link_timeout`) for a new `bridge_status` record with a
   timestamp after the launch, reading the transcript directly rather than waiting for the
   watcher. On success the response carries the URL and the page navigates to it. On timeout it
@@ -246,8 +249,9 @@ Each suggestion is a card: title, why, evidence, and buttons that depend on its 
   chooses). `claude --bg` ignores `--session-id` and picks the id itself; vigil finds it as for
   Resume (part 2), from its output and `claude agents --json`. At the desk it opens a terminal
   attached to it. From a phone it adds `--remote-control` and waits for the link as in part 2,
-  finding the transcript by that id. If the id cannot be found, the answer says the session
-  started and its link is not available yet, with no terminal and no link.
+  finding the transcript by that id. If only its job id is known, it attaches by that and the
+  answer is pending; if `claude --bg` printed no job id, the answer says the session started and
+  its link is not available yet, with no terminal and no link.
 - **Always use**: adds the flag to `resume.default_flags` in vigil's own config file, keeping
   the rest of the file as written (comments included). This is the only write to vigil's config
   from the web.

@@ -594,22 +594,24 @@ def test_remote_resume_started_as_a_copy_answers_with_the_copy(
     assert [row[0] for row in launches] == [COPY]
 
 
-def test_remote_resume_falls_back_to_the_requested_session(
+def test_remote_resume_of_a_copy_whose_full_id_is_unknown_is_pending(
     vigil_env: VigilEnv, remote_client: TestClient, tmp_path: Path
 ) -> None:
     transcript = start_in(vigil_env, tmp_path)
-    # The copy cannot be found among the running sessions: vigil looks for the link of the
-    # session it asked for, and says it is pending.
+    # `claude --bg` said it started a copy, which is not among the running sessions (yet): its
+    # job id is enough to attach to it, but without its full id there is no transcript to wait
+    # on, so the link is pending. The session asked for is not running: never attach to it.
     install_claude(vigil_env, transcript=transcript, link=LINK, copy_as=COPY, listed=False)
     response = remote_client.post(f"/sessions/{NAMED}/resume")
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
-        "attach": f"claude attach {NAMED[:8]}",
+        "attach": f"claude attach {COPY[:8]}",
         "opened_terminal": False,
         "remote_url": None,
         "pending": True,
         "at_desk": False,
+        "copy_of": NAMED,
     }
 
 

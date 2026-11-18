@@ -25,10 +25,16 @@ All notable changes to this project are recorded here, in the style of
 - Index each session's Remote Control link (`remote_url`) and whether a live session is busy.
 - Join from a phone: Resume from another device opens the session's Remote Control link; Open button for live sessions with a link.
 - Restart with Remote Control for background sessions without a link, after a confirm warning.
+- One flag allow-list with value rules (`vigil.flags`), used by config and every launch.
+- Session page: where the tokens went (per-turn tokens, cache hits, largest tool outputs, compactions).
+- Session reviews: Claude reads a non-persisted fork of a session and suggests flags, project file changes and habits; stored per session; `vigil review`.
+- Act on flag suggestions: resume or start a new session with them, or add them to `resume.default_flags`.
+- Apply project file suggestions to `CLAUDE.md` and `.claude/settings.json` after a preview.
+- Reviews and their actions work on peer sessions, run by the peer.
 
 ### Changed
 - Install guide rewritten step by step: install without pipx (a virtual environment), checks after each step, which way to keep vigil running, upgrade, uninstall and troubleshooting; the service files also look for `claude` in `/opt/bin`.
-- The first scan after upgrading re-reads every transcript once (migration 0004).
+- `tomlkit` is now a runtime dependency, and the first scan after upgrading re-reads every transcript once (migration 0004).
 
 ### Fixed
 - A session started with a local command such as `/model` (or a `!` bash-mode command) is named after the first typed prompt, and command output is no longer taken for a prompt.

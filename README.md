@@ -293,6 +293,8 @@ pages:
   requires. When `claude --bg` started a copy of the session under a new id (see
   [Joining from a phone](#joining-from-a-phone)), the answer also has `"copy_of": "<id asked
   for>"` and `"session_id": "<the copy's id>"`, and the attach command and link are the copy's.
+  When `claude --bg` named the copy's job id but its full id cannot be found yet, `session_id` is
+  left out, the attach command uses that job id, and the link is `pending`.
 - `POST /sessions/{id}/restart-remote` with the form field `confirm=yes` (400 without it) stops a
   session running in the background (`claude stop <job id>`) and starts it again with Remote
   Control. It answers like a resume (such a session comes back as a copy, with `copy_of` and
@@ -350,16 +352,16 @@ one go better or cost less. vigil runs, in the session's folder:
       --max-budget-usd <review.max_budget_usd> [--model <review.model>] "<review prompt>"
 
 Claude reads a fork of the whole session that is not saved and has no tools, so the session itself
-is untouched and nothing new appears under `~/.claude`. No MCP server is loaded either, not even
-the project's own (`.mcp.json`): `--strict-mcp-config` with no `--mcp-config` keeps them out, so
-a review starts no server processes and has no tools beyond answering. The prompt carries the token numbers vigil
-computed from the transcript, the flags vigil launched the session with (only launches vigil made,
-so they may be incomplete), your `resume.default_flags` and the flags and subcommands of the
-installed `claude`. Claude answers with at most ten suggestions, each a flag, a change to
+is untouched and nothing new appears under `~/.claude`. No MCP server is loaded either, not even the
+project's own (`.mcp.json`): `--strict-mcp-config` with no `--mcp-config` keeps them out, so a
+review starts no server processes and has no tools beyond answering. The prompt carries the token
+numbers vigil computed from the transcript, the flags vigil launched the session with (only launches
+vigil made, so they may be incomplete), your `resume.default_flags` and the flags and subcommands of
+the installed `claude`. Claude answers with at most ten suggestions, each a flag, a change to
 CLAUDE.md or settings, or a habit, tied to evidence in the session, plus a few points of token
-advice. Every text field is cut to 500 characters and items that do not fit the schema are
-dropped. One review runs at a time on a machine (pressing **Review this session** while one runs
-shows the running one); reviews are kept until their session leaves the index.
+advice. Every text field is cut to 500 characters and items that do not fit the schema are dropped.
+One review runs at a time on a machine (pressing **Review this session** while one runs shows the
+running one); reviews are kept until their session leaves the index.
 
 A review spends your Claude usage. With the `[review]` defaults it runs on `sonnet`
 (`review.model`) and may spend up to $3.00 (`review.max_budget_usd`; Claude Code checks it after
@@ -380,8 +382,9 @@ installed `claude`) has three buttons:
   vigil reads it from what `claude --bg` prints and `claude agents --json`. With tmux (when there
   is no `--bg`) it runs `claude --session-id <new id> …` under an id vigil chooses. At the desk it
   opens a terminal; from another device it waits for the Remote Control link, like Resume. If
-  vigil cannot tell which session started, it says the session started and its link is pending;
-  `claude agents` lists it.
+  vigil knows only the new session's job id, it attaches by that and says its link is pending; if
+  `claude --bg` printed no job id at all, it says the session started, and `claude agents` lists
+  it.
 - **Always use** adds the flag to `resume.default_flags` in vigil's config file, replacing the
   value of a flag already there. The rest of the file, comments included, is kept as written, and
   the file is only replaced when the result is a valid config. This is the only write to vigil's

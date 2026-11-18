@@ -58,8 +58,8 @@ class ResumeCommand:
             print(f"No terminal available. Attach with: {launched.attach}")
         else:
             print(f"Opened a terminal. To attach yourself: {launched.attach}")
-        if launched.copy_of is not None and launched.session_id is not None:
-            print(copy_note(launched.session_id))
+        if launched.copy_of is not None and launched.job is not None:
+            print(copy_note(launched.job))
         return 0
 
 

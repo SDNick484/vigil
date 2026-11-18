@@ -424,6 +424,7 @@ def test_resume_answer_handler_follows_link_and_offers_restart(web_client: TestC
         "the Remote Control link is not available yet",
         "data.copy_of",  # a background session that keeps its own options came back as a copy
         "this background session keeps its own options.",
+        "claude attach ([0-9a-f]{8})",  # a copy whose full id is unknown: its job id
         "data.restartable",
         "Restart with Remote Control",
         "restart-confirm",

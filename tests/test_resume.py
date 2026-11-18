@@ -2,6 +2,7 @@
 `claude`, `tmux` and terminals record their argv and cwd and exit; none of them runs anything."""
 
 import json
+import shlex
 import sqlite3
 import sys
 import time
@@ -753,24 +754,55 @@ def test_execute_resumed_in_place(workdir: Path, fake_bin: FakeBin, env: dict[st
 @pytest.mark.parametrize(
     ("output", "live"),
     [
-        ("Starting background service…\n", "listed"),  # no job id printed
-        (backgrounded(COPY), "missing"),  # not listed as running
-        (backgrounded(COPY), "elsewhere"),  # listed, but in another folder
-        (backgrounded(COPY), "unlisted"),  # the running sessions cannot be listed
+        ("Starting background service\u2026\n", "listed"),  # no job id printed
+        (backgrounded(SID), "missing"),  # its own job id, not listed as running
+        (backgrounded(SID), "unlisted"),  # its own job id; the sessions cannot be listed
     ],
 )
 def test_execute_falls_back_to_the_requested_session(
     workdir: Path, fake_bin: FakeBin, env: dict[str, str], output: str, live: str
 ) -> None:
-    sessions = {
-        "listed": [entry(COPY, workdir)],
-        "missing": [entry(SID, workdir)],
-        "elsewhere": [entry(COPY, "/elsewhere")],
-        "unlisted": "not json",
-    }[live]
+    sessions = {"listed": [entry(COPY, workdir)], "missing": [], "unlisted": "not json"}[live]
     install_bg_claude(fake_bin, output, sessions)  # type: ignore[arg-type]
     plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, env)
     assert execute(plan) == Launched(f"claude attach {JOB}", None, SID)
+
+
+@pytest.mark.parametrize(
+    "live",
+    [
+        "missing",  # not listed as running (yet)
+        "elsewhere",  # listed, but in another folder (a worktree, say)
+        "ambiguous",  # two running sessions share the job id
+        "unlisted",  # the running sessions cannot be listed
+    ],
+)
+def test_execute_attaches_to_a_copy_whose_full_id_is_unknown(
+    workdir: Path,
+    fake_bin: FakeBin,
+    env: dict[str, str],
+    conn: sqlite3.Connection,
+    live: str,
+) -> None:
+    # `claude --bg` said it started another job than the one asked for: that is what runs, and
+    # `claude attach` takes the job id, so attach to it even without its full id.
+    other = COPY[:8] + "-0000-4000-8000-0000000000dd"
+    sessions = {
+        "missing": [entry(SID, workdir)],
+        "elsewhere": [entry(COPY, workdir / "worktree")],
+        "ambiguous": [entry(COPY, workdir), entry(other, workdir)],
+        "unlisted": "not json",
+    }[live]
+    install_bg_claude(fake_bin, backgrounded(COPY), sessions)  # type: ignore[arg-type]
+    fake_bin.install("xterm")
+    plan = plan_resume(make_session(str(workdir)), ALL_CAPS, {}, RC, {**env, "DISPLAY": ":0"})
+    attach = ["claude", "attach", COPY[:8]]
+    assert execute(plan, conn=conn) == Launched(
+        shlex.join(attach), ["xterm", "-e", *attach], None, copy_of=SID
+    )
+    [xterm] = wait_for_calls(fake_bin, "xterm")
+    assert xterm.argv == ["-e", *attach]
+    assert [session for *_, session in launches(conn)] == [None, None]
 
 
 def test_execute_start_new_finds_the_new_session(
@@ -785,6 +817,19 @@ def test_execute_start_new_finds_the_new_session(
     [xterm] = wait_for_calls(fake_bin, "xterm")
     assert xterm.argv == ["-e", "claude", "attach", COPY[:8]]
     assert [session for *_, session in launches(conn)] == [COPY, COPY]
+
+
+def test_execute_start_new_with_only_its_job_id(
+    workdir: Path, fake_bin: FakeBin, env: dict[str, str], conn: sqlite3.Connection
+) -> None:
+    install_bg_claude(fake_bin, backgrounded(COPY), [])  # printed its job id; not listed yet
+    fake_bin.install("xterm")
+    plan = plan_start_new(str(workdir), [], ALL_CAPS, RC, {**env, "DISPLAY": ":0"}, NEW_ID)
+    attach = ["claude", "attach", COPY[:8]]
+    assert execute(plan, conn=conn) == Launched(shlex.join(attach), ["xterm", "-e", *attach], None)
+    [xterm] = wait_for_calls(fake_bin, "xterm")
+    assert xterm.argv == ["-e", *attach]
+    assert [session for *_, session in launches(conn)] == [None, None]
 
 
 def test_execute_start_new_without_its_id_opens_no_terminal(

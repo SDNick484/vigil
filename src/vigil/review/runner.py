@@ -39,9 +39,10 @@ from string import Template
 from typing import Any
 
 from vigil.catalog import CatalogEntry
+from vigil.claude_cli import SESSION_ID
 from vigil.config import ReviewConfig
 from vigil.index.queries import SessionRow, vigil_launch_flags
-from vigil.resume import SESSION_ID, ResumeRefused, _check_cwd
+from vigil.resume import ResumeRefused, _check_cwd
 from vigil.review.numbers import SessionNumbers, compute_numbers, wall_clock
 from vigil.review.schema import SCHEMA, Advice, Suggestion, clean, parse_output
 from vigil.review.store import (

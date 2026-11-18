@@ -205,6 +205,9 @@ def test_background_job_reads_what_claude_bg_printed() -> None:
     assert background_job(copy_note + BG_OUTPUT.replace("1a2b3c4d", "5e6f7a8b")) == "5e6f7a8b"
     for output in ("", "Starting background service…\n", "backgrounded · nothex12\n"):
         assert background_job(output) is None
+    # Colored output: the escape sequences are not part of what it says.
+    assert background_job("\x1b[32mbackgrounded\x1b[0m · 1a2b3c4d (idle)\n") == "1a2b3c4d"
+    assert background_job("backgrounded · \x1b[1m1a2b3c4d\x1b[22m (idle)\n") == "1a2b3c4d"
 
 
 def test_started_session_matches_job_id_and_folder(fake_bin: FakeBin, tmp_path: Path) -> None:
@@ -217,6 +220,10 @@ def test_started_session_matches_job_id_and_folder(fake_bin: FakeBin, tmp_path: 
     install_claude(fake_bin, version="", help_text="", agents_json=json.dumps(agents))
     assert started_session(BG_OUTPUT, str(tmp_path)) == started
     assert started_session(BG_OUTPUT, "/nowhere") is None
+    # Only ever a session id: anything else from `agents --json` is not taken as one.
+    bad = [{"sessionId": "1a2b3c4d -x", "cwd": str(tmp_path)}]
+    install_claude(fake_bin, version="", help_text="", agents_json=json.dumps(bad))
+    assert started_session(BG_OUTPUT, str(tmp_path)) is None
     assert started_session("no job id here", str(tmp_path)) is None
     install_claude(fake_bin, version="", help_text="", agents_json="garbage")
     assert started_session(BG_OUTPUT, str(tmp_path)) is None

@@ -555,8 +555,8 @@ def test_forward_resume_carries_remote_url_and_restartable(tmp_path: Path) -> No
 
 
 def test_forward_resume_carries_a_copy(tmp_path: Path) -> None:
-    """A peer whose `claude --bg` started a copy of the session says which: passed on when both
-    are session ids, dropped otherwise."""
+    """A peer whose `claude --bg` started a copy of the session says so: `copy_of`, and the
+    copy's `session_id` when it knows it, each passed on only when it is a session id."""
     peer = Peer("peer-b", PEER_B_URL, write_token(tmp_path / "token", TOKEN_B))
     copy = "5e6f7a8b-0000-4000-8000-00000000000c"
     answer: dict[str, Any] = {"ok": True, "attach": "claude attach 5e6f7a8b"}
@@ -569,6 +569,9 @@ def test_forward_resume_carries_a_copy(tmp_path: Path) -> None:
     forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
     assert (forwarded["copy_of"], forwarded["session_id"]) == (HANDMADE, copy)
     answer.update(session_id="-not an id")
+    forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
+    assert forwarded["copy_of"] == HANDMADE and "session_id" not in forwarded
+    answer.update(copy_of="-not an id", session_id=copy)
     forwarded = peers.forward_resume(peer, HANDMADE, transport=network.transport())
     assert "copy_of" not in forwarded and "session_id" not in forwarded
 
