@@ -14,3 +14,14 @@ jobs:
           python-version: "3.14"
       - run: pip install -e .[dev]
       - run: ruff check . && ruff format --check . && mypy && pytest
+
+  ebuild-syntax:
+    # A full pkgcheck run needs a gentoo/stage3 container with the Portage tree synced and
+    # pkgcheck emerged, which takes far longer than a few minutes, so CI only checks syntax.
+    # Run pkgcheck by hand; see packaging/gentoo/README.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n packaging/gentoo/dev-util/vigil/vigil-9999.ebuild
+      - run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+      - run: xmllint --noout packaging/gentoo/dev-util/vigil/metadata.xml
