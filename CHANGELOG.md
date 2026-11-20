@@ -7,6 +7,7 @@ All notable changes to this project are recorded here, in the style of
 ## [Unreleased]
 
 ### Added
+- `vigil upgrade [--ref REF] [--dry-run] [--no-restart]`: upgrade vigil the way it was installed (`install.sh` venv, other venv, pipx; refuses a system package and names `emerge -u dev-util/vigil` on Gentoo), then restart the `vigil setup` service.
 - `install.sh`: POSIX installer and upgrader (private venv, `~/.local/bin` link, `vigil-install.toml`, hands off to `vigil setup`), with `--ref`, `--yes`, `--no-setup`, `--dry-run`, `--uninstall` and `--purge`; shellcheck runs in CI.
 - Live Gentoo ebuild `dev-util/vigil-9999` in `packaging/gentoo`, with a test that keeps its `RDEPEND` in step with `pyproject.toml`, and a CI syntax check.
 - Design for the install script, `vigil upgrade` and the live Gentoo ebuild.

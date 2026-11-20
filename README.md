@@ -194,7 +194,21 @@ to the `PATH` line in the file.
 
 ## Upgrade
 
-Fetch the latest version the same way you installed it, then restart vigil.
+    vigil upgrade
+
+It works out how vigil was installed and upgrades it that way, then restarts it if `vigil setup`
+installed a service or autostart entry for it. It prints the version before and after.
+
+- **`install.sh` or another virtual environment:** pip upgrades vigil in that environment, from the
+  ref `install.sh` recorded (`--ref REF` chooses another; the default is `main`).
+- **pipx:** `pipx install --force` from the same ref.
+- **A package manager (for example `emerge`):** `vigil upgrade` refuses and names the command to
+  use, such as `emerge -u dev-util/vigil` on Gentoo.
+
+`vigil upgrade --dry-run` shows what it would run and changes nothing; `--no-restart` upgrades
+without restarting. If vigil is not running as a service, there is nothing for it to restart.
+
+To do it by hand, fetch the latest version the same way you installed it, then restart vigil.
 
 - **pipx:** `pipx install --force --python python3.14 git+https://github.com/SDNick484/vigil`
 - **Virtual environment:**
