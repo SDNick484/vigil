@@ -118,7 +118,7 @@ def plan_upgrade(install: Install, ref: str | None) -> list[list[str]]:
     source = f"git+{REPO_URL}@{resolve_ref(install, ref)}"
     if install.kind == "pipx":
         return [["pipx", "install", "--force", "--python", sys.executable, source]]
-    return [[sys.executable, "-m", "pip", "install", "--upgrade", source]]
+    return [[sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", source]]
 
 
 def record_install(install: Install, ref: str, now: datetime | None = None) -> bool:

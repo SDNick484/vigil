@@ -147,7 +147,15 @@ def test_usr_as_a_venv_is_not_system(tmp_path: Path) -> None:
 def test_script_and_venv_plan_a_pip_upgrade(world: Upgrade, kind: str) -> None:
     install = Install(kind, world.prefix, None)  # type: ignore[arg-type]
     assert upgrade.plan_upgrade(install, None) == [
-        [str(world.python), "-m", "pip", "install", "--upgrade", f"{SOURCE}main"]
+        [
+            str(world.python),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            f"{SOURCE}main",
+        ]
     ]
 
 
@@ -226,7 +234,14 @@ def test_upgrade_of_a_script_install_runs_pip_records_the_ref_and_prints_version
     code, out, _ = world.run(capsys, "--no-restart")
     assert code == 0
     assert world.python_calls() == [
-        ["-m", "pip", "install", "--upgrade", f"{SOURCE}v1"],  # the marker's ref
+        [
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            f"{SOURCE}v1",
+        ],  # the marker's ref
         ["-m", "vigil", "--version"],
     ]
     assert f"Version before: vigil-sessions {__version__}" in out
@@ -297,7 +312,7 @@ def test_dry_run_runs_nothing_and_writes_nothing(
     world.service("systemd")
     code, out, _ = world.run(capsys, "--dry-run")
     assert code == 0
-    assert f"would run: {world.python} -m pip install --upgrade {SOURCE}v1" in out
+    assert f"would run: {world.python} -m pip install --upgrade --force-reinstall {SOURCE}v1" in out
     assert "would run: systemctl --user restart vigil.service" in out
     assert "Dry run" in out
     assert world.python_calls() == []
