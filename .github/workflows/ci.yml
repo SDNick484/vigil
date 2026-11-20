@@ -23,4 +23,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash -n packaging/gentoo/dev-util/vigil/vigil-9999.ebuild
+      - run: sudo apt-get update && sudo apt-get install -y libxml2-utils
       - run: xmllint --noout packaging/gentoo/dev-util/vigil/metadata.xml
