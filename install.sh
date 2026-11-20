@@ -307,7 +307,7 @@ install() {
         run "$PY" -m venv "$VENV" ||
             die "could not create the environment (on Debian or Ubuntu the python3.$MIN_MINOR-venv package is needed)."
     fi
-    run "$VENV/bin/python" -m pip install --upgrade "git+$REPO_URL@$REF" ||
+    run "$VENV/bin/python" -m pip install --upgrade --force-reinstall "git+$REPO_URL@$REF" ||
         die "pip could not install vigil from $REPO_URL@$REF."
     write_marker
     run mkdir -p "$BIN_DIR"

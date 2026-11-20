@@ -312,7 +312,9 @@ def test_fresh_install_writes_the_marker_and_the_link(tree: Tree) -> None:
     assert marker["ref"] == "main" and marker["source"] == "install.sh"
     assert marker["installed_at"].endswith("Z") and "T" in marker["installed_at"]
     assert any(
-        c.startswith("pip install --upgrade git+https://github.com/SDNick484/vigil@main")
+        c.startswith(
+            "pip install --upgrade --force-reinstall git+https://github.com/SDNick484/vigil@main"
+        )
         for c in tree.calls()
     )
     assert tree.calls("vigil setup --help") and tree.calls("vigil setup --yes")
@@ -381,7 +383,7 @@ def test_rerun_upgrades_and_restarts(installed: Tree) -> None:
     result = installed.run("--yes")
     assert result.code == 0, result.err
     calls = installed.calls()
-    assert any(c.startswith("pip install --upgrade git+") for c in calls)
+    assert any(c.startswith("pip install --upgrade --force-reinstall git+") for c in calls)
     assert not any(c.startswith("python3.14 -m venv") for c in calls)
     assert any(c.startswith("pkill -f -- ") and "vigil serve" in c for c in calls)
     assert f"setsid -f {installed.bin / 'vigil'} serve" in calls
