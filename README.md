@@ -100,6 +100,12 @@ each row. Press `Ctrl-C` in the terminal to stop `vigil serve`. vigil only liste
 `127.0.0.1`, so other machines can't reach it (see [Remote access](#remote-access) if you want
 them to).
 
+### Gentoo
+
+On Gentoo, install vigil with `emerge` instead of the steps above. A live ebuild
+(`dev-util/vigil-9999`) lives in [`packaging/gentoo`](packaging/gentoo/README.md), which also says
+how to add the overlay that carries it. Then run `vigil setup` as your own user.
+
 ## Run
 
 `vigil setup` ([Step 3](#step-3-vigil-setup)) does everything in this section for you. To do it by
