@@ -22,15 +22,43 @@ then let `vigil setup` keep it running. Every step below runs as your own user, 
 
 ### Step 1: install vigil
 
-Pick **one** of the two ways below. Either way you end up with a `vigil` command in
-`~/.local/bin`, in its own private Python environment, so nothing it installs touches your system
-Python.
+**Recommended: the install script.** It needs Python 3.14 or newer and git, runs as your own user
+(it refuses to run as root and never uses `sudo`), and ends with a `vigil` command in
+`~/.local/bin`, in its own private Python environment (`~/.local/share/vigil-venv`), so nothing it
+installs touches your system Python. It never edits your shell files; if `~/.local/bin` is not on
+your `PATH` it prints the line to add and which file it goes in.
 
-**A. With pipx**, if your distribution has it:
+    curl -fsSL https://raw.githubusercontent.com/SDNick484/vigil/main/install.sh | sh
+
+If you would rather read it first, download it, read it, then run it:
+
+    curl -fsSLO https://raw.githubusercontent.com/SDNick484/vigil/main/install.sh
+    less install.sh
+    sh install.sh
+
+On a first install the script then offers to run `vigil setup` ([Step 3](#step-3-vigil-setup)),
+which asks before it changes anything. Run the script again at any time to upgrade: it installs
+the newest version of the same ref and restarts vigil if it is running (a systemd or OpenRC user
+service is not restarted for you; the script prints the command).
+
+- `--ref REF` installs a branch, tag or commit instead of `main`; a later run without `--ref`
+  keeps the one you chose.
+- `--yes` does not ask before going ahead; `--no-setup` skips `vigil setup`.
+- `--dry-run` prints every action and changes nothing.
+- `--uninstall` runs `vigil setup --remove`, then removes the environment and the link;
+  `--purge` also removes vigil's own data and config (`~/.local/share/vigil`, `~/.config/vigil`).
+  It never touches `~/.claude`.
+- It refuses, and says why, if a `vigil` outside `~/.local/bin` is on your `PATH` or pipx already
+  has `vigil-sessions`: upgrade or remove that install with the tool that made it.
+
+If you use the script, skip to [Step 2](#step-2-check-that-it-works). The two manual ways below do
+the same job by hand. Pick **one** of them.
+
+**Manual, with pipx**, if your distribution has it:
 
     pipx install --python python3.14 git+https://github.com/SDNick484/vigil
 
-**B. Without pipx**, using a plain virtual environment. This is the way to go on Gentoo and
+**Manual, without pipx**, using a plain virtual environment. This is the way to go on Gentoo and
 anywhere else pipx isn't packaged:
 
     python3.14 -m venv ~/.local/share/vigil-venv
