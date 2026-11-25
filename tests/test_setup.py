@@ -87,7 +87,9 @@ class World:
 
 
 @pytest.fixture
-def world(vigil_env: VigilEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+def world(
+    vigil_env: VigilEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proc_version: Path
+) -> World:
     monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
     return World(vigil_env, tmp_path, monkeypatch)
 
@@ -238,6 +240,103 @@ def test_claudes_folder_goes_into_the_installed_service(
     written = world.path_of("systemd").read_text()
     assert f"Environment=PATH={world.bin.directory}:" in written
     assert f"ExecStart={world.vigil} serve" in written
+
+
+WINDOWS_APPS = "/mnt/c/Users/user/AppData/Local/Microsoft/WindowsApps"
+
+
+@pytest.mark.parametrize("method", ["systemd", "openrc"])
+def test_windows_terminals_folder_goes_last_on_the_services_path(method: Method) -> None:
+    # Last, so a Windows program never shadows a Linux one of the same name.
+    text = setup.render(method, Path("/x/vigil"), "/opt/bin2", HOME, terminal_dir=WINDOWS_APPS)
+    line = _line_with(text, "PATH=")
+    assert line.startswith(("Environment=PATH=/opt/bin2:", 'export PATH="/opt/bin2:'))
+    assert line.rstrip('"').endswith(f":{WINDOWS_APPS}")
+
+
+def test_the_wsl_distro_is_passed_to_the_service() -> None:
+    unit = setup.render("systemd", Path("/x/vigil"), None, HOME, distro="Ubuntu-24.04")
+    assert "Environment=WSL_DISTRO_NAME=Ubuntu-24.04" in unit.splitlines()
+    script = setup.render("openrc", Path("/x/vigil"), None, HOME, distro="Ubuntu-24.04")
+    assert 'export WSL_DISTRO_NAME="Ubuntu-24.04"' in script.splitlines()
+
+
+def test_a_distro_name_that_cannot_be_written_safely_is_left_out() -> None:
+    text = setup.render("openrc", Path("/x/vigil"), None, HOME, distro='a"; rm -rf ~; "')
+    assert "WSL_DISTRO_NAME" not in text
+
+
+def test_autostart_ignores_the_wsl_settings() -> None:
+    plain = setup.render("autostart", Path("/x/vigil"), None, HOME)
+    wsl = setup.render(
+        "autostart", Path("/x/vigil"), None, HOME, terminal_dir=WINDOWS_APPS, distro="Gentoo"
+    )
+    assert wsl == plain
+
+
+def test_windows_terminal_is_not_looked_for_outside_wsl(world: World) -> None:
+    world.bin.install("wt.exe")
+    world.bin.install("cmd.exe")
+    assert setup.windows_terminal_folder() is None
+    assert world.calls("cmd.exe") == []
+
+
+def test_windows_terminal_on_path_is_used_under_wsl(world: World, proc_version: Path) -> None:
+    proc_version.write_text("Linux version 6.6.0-microsoft-standard-WSL2\n")
+    world.bin.install("wt.exe")
+    world.bin.install("cmd.exe")
+    assert setup.windows_terminal_folder() == str(world.bin.directory)
+    assert world.calls("cmd.exe") == []
+
+
+def _windows_apps(world: World, tmp_path: Path, *, with_wt: bool = True) -> Path:
+    """A Windows %LOCALAPPDATA% under tmp that `cmd.exe` names and `wslpath` converts."""
+    local = tmp_path / "AppData" / "Local"
+    apps = local / "Microsoft" / "WindowsApps"
+    apps.mkdir(parents=True)
+    if with_wt:
+        (apps / "wt.exe").write_text("")
+    world.bin.install("cmd.exe", stdout="C:\\Users\\user\\AppData\\Local\r\n")
+    world.bin.install("wslpath", stdout=f"{local}\n")
+    return apps
+
+
+def test_windows_terminal_off_path_is_found_in_windows_apps(
+    world: World, proc_version: Path, tmp_path: Path
+) -> None:
+    proc_version.write_text("Linux version 6.6.0-microsoft-standard-WSL2\n")
+    apps = _windows_apps(world, tmp_path)
+    assert setup.windows_terminal_folder() == str(apps)
+    assert world.calls("cmd.exe") == [["/d", "/c", "echo %LOCALAPPDATA%"]]
+    assert world.calls("wslpath") == [["-u", "C:\\Users\\user\\AppData\\Local"]]
+
+
+def test_no_windows_terminal_in_windows_apps_is_none(
+    world: World, proc_version: Path, tmp_path: Path
+) -> None:
+    proc_version.write_text("Linux version 6.6.0-microsoft-standard-WSL2\n")
+    _windows_apps(world, tmp_path, with_wt=False)
+    assert setup.windows_terminal_folder() is None
+
+
+def test_under_wsl_the_installed_service_can_open_windows_terminal(
+    world: World, proc_version: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    proc_version.write_text("Linux version 6.6.0-microsoft-standard-WSL2\n")
+    world.monkeypatch.setenv("WSL_DISTRO_NAME", "Gentoo")
+    apps = _windows_apps(world, tmp_path)
+    world.bin.install("rc-service")
+    world.bin.install("rc-update")
+    code, out, _ = world.run(capsys, "--method", "openrc", "--yes")
+    assert code == 0
+    written = world.path_of("openrc").read_text()
+    assert _line_with(written, "export PATH=").endswith(f':${{PATH}}:{apps}"')
+    assert 'export WSL_DISTRO_NAME="Gentoo"' in written.splitlines()
+    assert f"includes {apps}, where Windows Terminal (wt.exe) was found" in out
+
+
+def _line_with(text: str, needle: str) -> str:
+    return next(line for line in text.splitlines() if needle in line)
 
 
 # Install -----------------------------------------------------------------------------------

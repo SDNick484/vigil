@@ -49,3 +49,4 @@ All notable changes to this project are recorded here, in the style of
 - Reviews load no MCP servers (`--strict-mcp-config`); a project's `.mcp.json` servers had been started for each review.
 - `vigil setup`, `vigil doctor` and `vigil upgrade` no longer take a closed port that does not answer (WSL2 mirrored networking drops the connection) for one in use by something else; the port is free when vigil can bind it.
 - `vigil setup --method openrc` makes `~/.config/rc/runlevels/default` before `rc-update --user add`, which rejected the runlevel when no OpenRC user session had run yet (no `pam_openrc`, as under WSL).
+- Under WSL, `vigil setup` puts the folder of Windows Terminal (`wt.exe`, found on PATH or in `%LOCALAPPDATA%\Microsoft\WindowsApps`) last on the service's PATH and passes `WSL_DISTRO_NAME`, so Resume opens a terminal; the service had no Windows folders on PATH and Resume started the session without one.
