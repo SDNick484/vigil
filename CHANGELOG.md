@@ -47,3 +47,5 @@ All notable changes to this project are recorded here, in the style of
 - Resume, Restart with Remote Control and the attach command shown pass `claude attach` and `claude stop` the 8-character job id they require, not the full session id they refuse (Resume's attach command had been wrong since v1).
 - After `claude --bg`, vigil follows the session that actually started (its job id from the output, its full id from `claude agents --json`): a copy of a background session resumed with flags (the answer says so with `copy_of`), or a new session's own id, since `--bg` ignores `--session-id`.
 - Reviews load no MCP servers (`--strict-mcp-config`); a project's `.mcp.json` servers had been started for each review.
+- `vigil setup`, `vigil doctor` and `vigil upgrade` no longer take a closed port that does not answer (WSL2 mirrored networking drops the connection) for one in use by something else; the port is free when vigil can bind it.
+- `vigil setup --method openrc` makes `~/.config/rc/runlevels/default` before `rc-update --user add`, which rejected the runlevel when no OpenRC user session had run yet (no `pam_openrc`, as under WSL).

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.error
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -312,6 +313,17 @@ def test_openrc_install_steps(world: World, capsys: pytest.CaptureFixture[str]) 
     assert world.calls("rc-update") == [["--user", "add", "vigil", "default"]]
     assert world.path_of("openrc").stat().st_mode & 0o777 == 0o755
     assert world.path_of("openrc").parent == world.config_home / "rc" / "init.d"
+
+
+def test_openrc_makes_the_default_runlevel_when_no_user_session_has_yet(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `openrc --user` makes ~/.config/rc/runlevels on its first run; without it (no pam_openrc,
+    # as under WSL) `rc-update --user add vigil default` says the runlevel is not valid.
+    world.bin.install("rc-service")
+    world.bin.install("rc-update")
+    assert world.run(capsys, "--method", "openrc", "--yes")[0] == 0
+    assert (world.config_home / "rc" / "runlevels" / "default").is_dir()
 
 
 def test_the_recommended_method_is_used_when_none_is_given(
@@ -668,6 +680,34 @@ def test_probe_says_free_for_a_closed_port() -> None:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     assert setup.probe_health(port).state == "free"
+
+
+def test_probe_says_free_when_a_closed_port_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # WSL2 mirrored networking drops a connection to a closed loopback port instead of
+    # refusing it, so the check times out; the port can still be bound, so it is free.
+    def timeout(url: str, timeout: float) -> None:
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(setup._LOOPBACK_ONLY, "open", timeout)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    assert setup.probe_health(port).state == "free"
+
+
+def test_probe_says_other_when_a_bound_port_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(url: str, timeout: float) -> None:
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(setup._LOOPBACK_ONLY, "open", timeout)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        assert setup.probe_health(sock.getsockname()[1]).state == "other"
 
 
 def test_probe_ignores_a_proxy_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
