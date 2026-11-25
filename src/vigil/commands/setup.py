@@ -10,6 +10,7 @@ from vigil import setup
 from vigil.config import Config
 from vigil.paths import config_home
 from vigil.setup import Method, SetupError, Step
+from vigil.terminal import is_wsl
 
 _NAMES: dict[Method, str] = {
     "autostart": "XDG autostart entry",
@@ -118,7 +119,16 @@ class SetupCommand:
         home_config = config_home()
         path = setup.entry_path(method, home_config)
         claude_dir = setup.claude_folder()
-        text = setup.render(method, vigil_bin, claude_dir, Path.home())
+        wsl = method != "autostart" and is_wsl(os.environ)
+        terminal_dir = setup.windows_terminal_folder() if wsl else None
+        text = setup.render(
+            method,
+            vigil_bin,
+            claude_dir,
+            Path.home(),
+            terminal_dir=terminal_dir,
+            distro=os.environ.get("WSL_DISTRO_NAME") if wsl else None,
+        )
         existing = path.read_text() if path.is_file() else None
         changed = existing is not None and existing != text
 
@@ -130,6 +140,10 @@ class SetupCommand:
                 _say(f"  PATH:  includes {claude_dir}, where claude was found")
             else:
                 _say("  PATH:  claude was not found now, so the service may not find it either")
+        if terminal_dir is not None:
+            _say(f"  PATH:  includes {terminal_dir}, where Windows Terminal (wt.exe) was found")
+        elif wsl:
+            _say("  PATH:  Windows Terminal (wt.exe) was not found, so Resume opens no terminal")
         if existing is None:
             _say("  new file")
         elif not changed:

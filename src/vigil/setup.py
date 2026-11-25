@@ -24,6 +24,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal, get_args
 
+from vigil.terminal import is_wsl
+
 Method = Literal["autostart", "systemd", "openrc"]
 METHODS: tuple[Method, ...] = get_args(Method)
 
@@ -43,6 +45,8 @@ _TEMPLATES: dict[Method, tuple[str, str]] = {
 # What may appear in a path that goes into a generated file: no quote, `$`, backtick, backslash,
 # `%` (a systemd specifier, a desktop field code) or newline, so no quoting rule can be got wrong.
 _SAFE_PATH = re.compile(r"[\w./+@:,=~ -]+")
+_DISTRO = re.compile(r"[\w.-]+")
+"""A WSL distro name setup passes to a service; any other is left out."""
 _OPENRC_VERSION = re.compile(r"(\d+)\.(\d+)")
 OPENRC_MIN = (0, 60)
 
@@ -78,6 +82,48 @@ def claude_folder(env: Mapping[str, str] | None = None) -> str | None:
     """The folder `claude` is found in on PATH now, or None."""
     found = shutil.which("claude", path=(env if env is not None else os.environ).get("PATH", ""))
     return os.path.dirname(found) if found else None
+
+
+def windows_terminal_folder(env: Mapping[str, str] | None = None) -> str | None:
+    """Under WSL, the folder of Windows Terminal (`wt.exe`), which Resume opens a session in; None
+    elsewhere, or when it is not found or its path cannot be written safely. On PATH first; else
+    ``%LOCALAPPDATA%\\Microsoft\\WindowsApps``, asked of `cmd.exe` and converted with `wslpath`,
+    since a login shell's PATH can lack the Windows folders (a profile that resets PATH)."""
+    env = env if env is not None else os.environ
+    if not is_wsl(env):
+        return None
+    path = env.get("PATH", "")
+    found = shutil.which("wt.exe", path=path)
+    if found:
+        folder = os.path.dirname(found)
+    else:
+        local = _windows_local_app_data(path)
+        if local is None:
+            return None
+        folder = os.path.join(local, "Microsoft", "WindowsApps")
+        if not os.path.exists(os.path.join(folder, "wt.exe")):
+            return None
+    return folder if _SAFE_PATH.fullmatch(folder) else None
+
+
+def _windows_local_app_data(path: str) -> str | None:
+    """``%LOCALAPPDATA%`` as a Linux path, or None."""
+    wslpath = shutil.which("wslpath", path=path)
+    if wslpath is None:
+        return None
+    cmd = shutil.which("cmd.exe", path=path) or _to_linux(wslpath, "C:\\Windows\\System32\\cmd.exe")
+    if cmd is None:
+        return None
+    result = _probe([cmd, "/d", "/c", "echo %LOCALAPPDATA%"])
+    value = result.stdout.strip() if result is not None and result.returncode == 0 else ""
+    return _to_linux(wslpath, value) if value and "%" not in value else None
+
+
+def _to_linux(wslpath: str, windows_path: str) -> str | None:
+    result = _probe([wslpath, "-u", windows_path])
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 def path_dirs(env: Mapping[str, str]) -> list[str]:
@@ -201,9 +247,19 @@ def _with_claude(value: str, claude_dir: str | None, home: Path, variable: str) 
     return value if claude_dir in listed else f"{claude_dir}:{value}"
 
 
-def render(method: Method, vigil_bin: Path, claude_dir: str | None, home: Path) -> str:
+def render(
+    method: Method,
+    vigil_bin: Path,
+    claude_dir: str | None,
+    home: Path,
+    *,
+    terminal_dir: str | None = None,
+    distro: str | None = None,
+) -> str:
     """The file setup writes: the template with the absolute path of `vigil` in it, for the
-    services a PATH that holds `claude_dir`, and the marker as its second line.
+    services a PATH that holds `claude_dir` (and, last, `terminal_dir`, the folder of `wt.exe`
+    under WSL) and ``WSL_DISTRO_NAME`` set to `distro`, and the marker as its second line.
+    A `distro` with a character other than a letter, digit, ``.``, ``_`` or ``-`` is left out.
 
     Raises SetupError for a path with a character that cannot be written safely.
     """
@@ -212,23 +268,33 @@ def render(method: Method, vigil_bin: Path, claude_dir: str | None, home: Path) 
     quoted = f'"{binary}"' if " " in binary else binary
     if claude_dir is not None:
         _check_path(claude_dir, "the folder of claude")
+    if terminal_dir is not None:
+        _check_path(terminal_dir, "the folder of wt.exe")
+    if distro is not None and not _DISTRO.fullmatch(distro):
+        distro = None
     if method == "autostart":
         text = _replace_line(text, "Exec=", f"Exec={quoted} serve")
     elif method == "systemd":
         text = _replace_line(text, "ExecStart=", f"ExecStart={quoted} serve")
         value = _line(text, "Environment=PATH=").removeprefix("Environment=PATH=")
         value = _with_claude(value, claude_dir, home, "%h")
+        if terminal_dir is not None:
+            value = f"{value}:{terminal_dir}"
         setting = f"PATH={value}"
-        text = _replace_line(
-            text,
-            "Environment=PATH=",
-            f'Environment="{setting}"' if " " in value else f"Environment={setting}",
-        )
+        lines = [f'Environment="{setting}"' if " " in value else f"Environment={setting}"]
+        if distro is not None:
+            lines.append(f"Environment=WSL_DISTRO_NAME={distro}")
+        text = _replace_line(text, "Environment=PATH=", "\n".join(lines))
     else:
         text = _replace_line(text, ': "${vigil_bin:=', f': "${{vigil_bin:={binary}}}"')
         head = 'export PATH="'
-        value = _line(text, head).removeprefix(head)
-        text = _replace_line(text, head, head + _with_claude(value, claude_dir, home, "${HOME}"))
+        value = _with_claude(_line(text, head).removeprefix(head), claude_dir, home, "${HOME}")
+        if terminal_dir is not None:
+            value = f'{value.removesuffix('"')}:{terminal_dir}"'
+        lines = [head + value]
+        if distro is not None:
+            lines.append(f'export WSL_DISTRO_NAME="{distro}"')
+        text = _replace_line(text, head, "\n".join(lines))
     first, _, rest = text.partition("\n")
     return f"{first}\n{MARKER}\n{rest}"
 
