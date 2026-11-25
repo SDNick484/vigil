@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -257,6 +258,13 @@ def check_target(path: Path, config_home: Path) -> None:
         raise SetupError(f"refusing to touch {path}: it is outside {config_home}")
 
 
+def ensure_runlevel(method: Method, config_home: Path) -> None:
+    """Make the user's OpenRC `default` runlevel folder. `openrc --user` makes it on its first
+    run; until then (no pam_openrc, as under WSL) `rc-update --user add` rejects the runlevel."""
+    if method == "openrc":
+        (config_home / "rc" / "runlevels" / "default").mkdir(parents=True, exist_ok=True)
+
+
 def write_entry(path: Path, text: str, mode: int, config_home: Path) -> None:
     """Write `text` to `path` (replacing any file there), making the folders it needs."""
     check_target(path, config_home)
@@ -411,9 +419,11 @@ def probe_health(port: int, timeout: float = 1.0) -> Health:
     except urllib.error.HTTPError:
         return Health("other")
     except urllib.error.URLError as error:
-        return Health("free" if isinstance(error.reason, ConnectionRefusedError) else "other")
+        if isinstance(error.reason, ConnectionRefusedError):
+            return Health("free")
+        return Health("free" if _can_bind(port) else "other")
     except OSError, ValueError:
-        return Health("other")
+        return Health("free" if _can_bind(port) else "other")
     if (
         isinstance(body, dict)
         and body.get("status") == "ok"
@@ -421,6 +431,18 @@ def probe_health(port: int, timeout: float = 1.0) -> Health:
     ):
         return Health("vigil", body["version"])
     return Health("other")
+
+
+def _can_bind(port: int) -> bool:
+    """Whether nothing listens on 127.0.0.1:`port`. A closed port can fail to answer instead of
+    refusing (WSL2 mirrored networking drops the connection), so no answer alone proves nothing."""
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
 
 
 def wait_for_health(port: int, timeout: float | None = None) -> Health | None:

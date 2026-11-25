@@ -160,6 +160,7 @@ class SetupCommand:
         if changed or existing is None:
             setup.write_entry(path, text, setup.entry_mode(method), home_config)
             _say(f"Wrote {_tilde(path)}.")
+        setup.ensure_runlevel(method, home_config)
 
         health = setup.probe_health(config.port)
         url = f"http://127.0.0.1:{config.port}/"
