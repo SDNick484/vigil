@@ -6,7 +6,8 @@
     <a href="{{ session_url(s) }}">{{ session_name(s) or preview(s.first_prompt) or s.session_id[:8] }}</a>
     {% if s.pinned %}<span class="badge">pinned</span>{% endif %}
     {% if s.archived %}<span class="badge">archived</span>{% endif %}
-    {% if s.stale %}<span class="badge stale" title="{{ peer }} could not be reached; this is what it last sent">stale</span>{% endif %}
+    {% if s.stale and hub %}<span class="badge stale" title="{{ s.machine }} has not been heard from lately; this is what it last sent">{{ s.machine }} last seen {{ (last_seen.get(s.machine) or s.received_at)|when }}</span>
+    {% elif s.stale %}<span class="badge stale" title="{{ peer }} could not be reached; this is what it last sent">stale</span>{% endif %}
     {% if s.note %}<span class="note">{{ s.note }}</span>{% endif %}
   </div>
   <div class="meta">
@@ -15,6 +16,14 @@
     {% if s.last_activity_at %}<time datetime="{{ s.last_activity_at.isoformat() }}">{{ s.last_activity_at|when }}</time>{% endif %}
     {% if machines %}<span class="machine">{{ s.machine }}</span>{% endif %}
   </div>
+  {% if hub %}
+  <div class="actions">
+    {% if s.open_url %}<a class="open" href="{{ s.open_url }}" rel="noopener">Open</a>{% endif %}
+    {% if s.machine_url %}<a href="{{ s.machine_url }}/sessions/{{ s.session_id|urlencode }}" rel="noopener">Resume on {{ s.machine }}</a>{% endif %}
+    <button type="button" data-copy="{{ resume_command(s) }}"
+            onclick="navigator.clipboard.writeText(this.dataset.copy)">Copy command</button>
+  </div>
+  {% else %}
   <div class="actions">
     {% if link %}<a class="open" href="{{ link }}" rel="noopener">{{ "Open in Claude" if at_desk else "Open" }}</a>{% endif %}
     <form method="post" action="{{ resume_url(s) }}"
@@ -23,5 +32,6 @@
     </form>
     <span class="result" id="resume-{{ key }}" aria-live="polite"></span>
   </div>
-  {% if s.status == "background" and not s.stale %}{% with result_id = "resume-" ~ key %}{% include "_restart_confirm.html" %}{% endwith %}{% endif %}
+  {% endif %}
+  {% if not hub and s.status == "background" and not s.stale %}{% with result_id = "resume-" ~ key %}{% include "_restart_confirm.html" %}{% endwith %}{% endif %}
 </li>

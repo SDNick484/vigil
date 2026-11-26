@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{% if row %}{{ session_name(row) or row.session_id[:8] }}{% else %}Not found{% endif %}{% endblock %}
+{% block content %}
+{% if not row %}
+<h1>No such session</h1>
+<p>No session matches <code>{{ ident }}</code> (unknown, or an ambiguous id prefix).</p>
+<p><a href="/">Back to sessions</a></p>
+{% else %}
+<p><a href="/">&larr; Sessions</a></p>
+<h1>{{ session_name(row) or preview(row.first_prompt) or row.session_id[:8] }}
+  {% if row.pinned %}<span class="badge">pinned</span>{% endif %}
+  {% if row.archived %}<span class="badge">archived</span>{% endif %}
+  {% if row.stale %}<span class="badge stale">{{ row.machine }} last seen {{ last_seen|when }}</span>{% endif %}
+</h1>
+
+<section>
+  <h2>Continue</h2>
+  {% if row.stale %}<p class="result refused">{{ row.machine }} last seen {{ last_seen|when }}; this is what it last sent.</p>{% endif %}
+  {% if row.open_url %}<p><a class="open" href="{{ row.open_url }}" rel="noopener">Join the running session</a></p>{% endif %}
+  {% if row.remote_url and row.remote_url != row.open_url %}
+  <p><a href="{{ row.remote_url }}" rel="noopener">Last Remote Control link</a>
+    <span class="muted">works only if the session is still running</span></p>
+  {% endif %}
+  {% if row.machine_url %}<p><a href="{{ row.machine_url }}/sessions/{{ row.session_id|urlencode }}" rel="noopener">Resume on {{ row.machine }}</a></p>{% endif %}
+  {% set command = resume_command(row) %}
+  <p>
+    <code id="command">{{ command }}</code>
+    <button type="button" data-copy="{{ command }}"
+            onclick="navigator.clipboard.writeText(this.dataset.copy)">Copy</button>
+  </p>
+</section>
+
+<section>
+  <h2>Last exchange</h2>
+  {% if row.last_user %}<h3>You</h3><pre>{{ row.last_user }}</pre>{% endif %}
+  {% if row.last_assistant %}<h3>Claude</h3><pre>{{ row.last_assistant }}</pre>{% endif %}
+  {% if not row.last_user and not row.last_assistant %}<p class="muted">Nothing stored.</p>{% endif %}
+</section>
+
+<section>
+  <h2>Details</h2>
+  <dl>
+    <dt>Session id</dt><dd><code>{{ row.session_id }}</code></dd>
+    <dt>Status</dt><dd><span class="status status-{{ row.status }}">{{ row.status }}</span></dd>
+    <dt>Project</dt><dd><a href="/?project={{ row.project_key|urlencode }}">{{ row.project_label }}</a>
+      <span class="muted">{{ row.project_key }}</span></dd>
+    <dt>Machine</dt><dd>{{ row.machine }}</dd>
+    <dt>Folder</dt><dd><code>{{ row.cwd or "-" }}</code></dd>
+    <dt>Branch</dt><dd>{{ row.git_branch or "-" }}</dd>
+    <dt>Title</dt><dd>{{ row.title or "-" }}</dd>
+    <dt>First prompt</dt><dd>{{ row.first_prompt or "-" }}</dd>
+    <dt>Started</dt><dd>{{ row.started_at|when }}</dd>
+    <dt>Last activity</dt><dd>{{ row.last_activity_at|when }}</dd>
+    <dt>Received</dt><dd>{{ row.received_at|when }}</dd>
+    <dt>Messages</dt><dd>{{ row.message_count }}</dd>
+    <dt>Models</dt><dd>{{ row.models|join(", ") or "-" }}</dd>
+    <dt>Claude Code</dt><dd>{{ row.version or "-" }}</dd>
+    <dt>Continues</dt><dd>{{ row.previous_session_id[:8] if row.previous_session_id else "-" }}</dd>
+    <dt>Transcript</dt><dd><code>{{ row.transcript_path or "-" }}</code> <span class="muted">on {{ row.machine }}</span></dd>
+  </dl>
+</section>
+{% if row.note %}
+<section>
+  <h2>Note</h2>
+  <p>{{ row.note }}</p>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

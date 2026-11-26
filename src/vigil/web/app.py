@@ -19,7 +19,7 @@ from vigil.paths import data_dir, index_path
 from vigil.peers import CACHE_DIR, PeerHub
 from vigil.review.runner import STOPPED
 from vigil.review.store import fail_if_running, fail_running
-from vigil.web import WebState, api, auth, ingest, pages, review, watcher
+from vigil.web import WebState, api, auth, hub_pages, ingest, pages, review, watcher
 from vigil.web.security import LoopbackGuard
 
 # Append point: include a router by appending one line.
@@ -30,6 +30,7 @@ ROUTERS: list[APIRouter] = [
     auth.router,
     review.router,
     ingest.router,
+    hub_pages.router,
 ]
 
 
