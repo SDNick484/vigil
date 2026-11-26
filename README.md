@@ -344,12 +344,13 @@ reference is at `/docs` while the service runs.
 | `GET /api/v1/sessions` | Sessions, newest activity first, one per resume chain (its newest session). |
 | `GET /api/v1/sessions/{id}` | One session plus `chain` (every session of its resume chain, oldest first) and `resume_command`. `{id}` may also be a unique id prefix or the session's exact title. 404 if nothing matches. |
 | `GET /api/v1/projects` | Projects: `project_key`, `label`, `session_count`, `last_activity_at`. |
-| `GET /api/v1/health` | `status` (`"ok"`), `version` (vigil's), `claude_version` (null when `claude` is not found), `indexed_sessions`, `last_scan_at` (null until the service has scanned). |
+| `GET /api/v1/health` | `status` (`"ok"`), `mode` (`"local"`, or `"hub"` for a vigil in hub mode), `version` (vigil's), `claude_version` (null when `claude` is not found), `indexed_sessions`, `last_scan_at` (null until the service has scanned). |
 | `GET /api/v1/sessions/{id}/reviews` | The session's [reviews](#session-reviews), newest first: `id`, `status` (`running`, `done` or `failed`), `created_at`, `finished_at`, `cost_usd` (as Claude Code reported it), `model`, `claude_version`, `numbers` (the token numbers the review was given), `suggestions`, `advice` (token advice) and `error` (why it failed, or a note such as going over the budget). |
 | `GET /api/v1/sessions/{id}/numbers` | Where the session's tokens went, read from its transcript now: `turns` (per turn: `turn`, `input`, `output`, `cache_write`, `cache_read`), `totals`, `cache_hit_share`, `largest_tool_outputs` (`tool`, `size` in characters), `compactions`, `models`, `started_at`, `ended_at` and `launch_flags` (from launches vigil made only). 404 when the transcript cannot be read or holds no usage. |
 | `GET /api/v1/reviews/{rid}` | One review by its id, with the fields of the list above. 404 when there is none. |
 | `GET /api/v1/reviews/{rid}/suggestions/{i}/change` | The change file suggestion `i` (counted from 0) of review `rid` would make: `target` (the file), `new_file`, `diff`, `skipped` (settings keys left alone because they are already set, with their `current` value) and `before_hash`, which [Apply](#applying-file-suggestions) needs. Nothing is written. 409 with the reason when vigil will not apply it (then the text is only to be copied). |
 | `GET /api/v1/peers` | The configured [peers](#peers): `name`, `url`, `fetched_at`, `stale` (it could not be reached), `error` (why), `session_count`. Their sessions are not in `/api/v1/sessions`, which lists this machine's only. |
+| `GET /api/v1/machines` | On a hub, the machines it lists, in the config's order: `name`, `url` (null if not configured), `last_snapshot_at` (when it last pushed), `last_seen_at` (when it last pushed or sent a heartbeat), `live_checked_at` (when it last asked `claude` which sessions are live), `stale` (never heard from, or not within `hub_mode.stale_after` seconds) and `session_count`; times are ISO 8601 in UTC or null. `[]` on a vigil that is not a hub. |
 
 `GET /api/v1/sessions` takes these query parameters, all optional:
 
@@ -394,7 +395,9 @@ owner; `chain` of one session holds only that session, since a snapshot has one 
 chain). Once a machine has not been heard from within `hub_mode.stale_after` seconds, its
 sessions are served as it last sent them with `stale: true`, and `open_url` null, `busy` false
 and `status` `unknown`; `remote_url` is kept. `resume_command` is the same `cd <folder> && claude
---resume <id>` as elsewhere, to run on the owning machine. `GET /api/v1/peers` is `[]`.
+--resume <id>` as elsewhere, to run on the owning machine. `GET /api/v1/peers` is `[]`, and
+`GET /api/v1/health` reports `claude_version` null, `last_scan_at` null and `indexed_sessions` as
+the number of sessions stored.
 
 These actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own
 pages:

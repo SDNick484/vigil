@@ -200,6 +200,47 @@ def test_peers_empty_on_hub(hub_client_for: ClientFor) -> None:
     assert hub_client_for(READ).get("/api/v1/peers").json() == []
 
 
+def test_machines_endpoint(hub_client_for: ClientFor) -> None:
+    body = snapshot_body()
+    body["live_checked_at"] = "2026-11-25T18:03:00Z"
+    laptop = hub_client_for(PUSH_LAPTOP)
+    assert laptop.put("/ingest/laptop/sessions", json=body).status_code == 200
+    digest = canonical_digest(body["sessions"])
+    beat = {"generated_at": "2026-11-25T18:05:00Z", "digest": digest}
+    assert laptop.post("/ingest/laptop/heartbeat", json=beat).status_code == 200
+    response = hub_client_for(READ).get("/api/v1/machines")
+    assert response.status_code == 200
+    first, second = response.json()
+    assert first["name"] == "laptop"
+    assert first["url"] == LAPTOP_URL
+    assert first["last_snapshot_at"] is not None
+    assert first["last_seen_at"] >= first["last_snapshot_at"]
+    assert first["live_checked_at"] == "2026-11-25T18:03:00.000000+00:00"
+    assert first["session_count"] == 2
+    assert first["stale"] is False
+    assert second == {
+        "name": "desk",
+        "url": None,
+        "last_snapshot_at": None,
+        "last_seen_at": None,
+        "live_checked_at": None,
+        "stale": True,
+        "session_count": 0,
+    }
+
+
+def test_health_in_hub_mode(hub_env: HubEnv, hub_client_for: ClientFor) -> None:
+    fill(hub_client_for)
+    response = hub_client_for(READ).get("/api/v1/health")
+    assert response.status_code == 200
+    health = response.json()
+    assert health["mode"] == "hub"
+    assert health["indexed_sessions"] == 4
+    assert health["claude_version"] is None
+    assert health["last_scan_at"] is None
+    assert hub_env.bin.calls("claude") == []
+
+
 def test_full_token_reads_listing(hub_client_for: ClientFor) -> None:
     fill(hub_client_for)
     assert len(listing(hub_client_for(FULL))) == 4

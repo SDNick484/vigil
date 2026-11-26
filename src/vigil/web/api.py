@@ -143,6 +143,7 @@ class UsageOut(BaseModel):
 
 class HealthOut(BaseModel):
     status: Literal["ok"]
+    mode: Literal["local", "hub"]
     version: str
     claude_version: str | None
     indexed_sessions: int
@@ -182,6 +183,20 @@ class ForwardedResumeOut(ResumeOut):
     """A resume forwarded to a peer: `attach` is to be run on `machine`."""
 
     machine: str
+
+
+class MachineOut(BaseModel):
+    """A machine a hub lists and when it last pushed (`last_snapshot_at`) and was last heard from
+    (`last_seen_at`, moved by heartbeats); `live_checked_at` is when the machine last asked
+    `claude` which sessions are live. `stale` when it was never heard from, or not lately."""
+
+    name: str
+    url: str | None
+    last_snapshot_at: str | None
+    last_seen_at: str | None
+    live_checked_at: str | None
+    stale: bool
+    session_count: int
 
 
 class PeerOut(BaseModel):
@@ -346,17 +361,38 @@ def peers(request: Request) -> list[dict[str, object]]:
     ]
 
 
+@router.get("/machines", response_model=list[MachineOut])
+def machines(request: Request) -> list[dict[str, object]]:
+    """The machines a hub lists, in the config's order, and when each last pushed and was heard
+    from; empty on a vigil that is not a hub."""
+    if (hub := state(request).hub) is None:
+        return []
+    return [
+        {
+            "name": machine.name,
+            "url": machine.url,
+            "last_snapshot_at": to_db(machine.last_snapshot_at),
+            "last_seen_at": to_db(machine.last_seen_at),
+            "live_checked_at": to_db(machine.live_checked_at),
+            "stale": machine.stale,
+            "session_count": machine.session_count,
+        }
+        for machine in hub.machines()
+    ]
+
+
 @router.get("/health", response_model=HealthOut)
 def health(request: Request) -> dict[str, object]:
     """Whether the service is up, what it runs, and how much it has indexed. A hub has no index
     and runs no `claude`."""
     web = state(request)
-    if web.config.mode == "hub":
+    if web.hub is not None:
         return {
             "status": "ok",
+            "mode": "hub",
             "version": vigil.__version__,
             "claude_version": None,
-            "indexed_sessions": 0,
+            "indexed_sessions": sum(machine.session_count for machine in web.hub.machines()),
             "last_scan_at": None,
         }
     with connection(request) as conn:
@@ -364,6 +400,7 @@ def health(request: Request) -> dict[str, object]:
     caps, _ = web.live.get()
     return {
         "status": "ok",
+        "mode": "local",
         "version": vigil.__version__,
         "claude_version": caps.version,
         "indexed_sessions": count,
