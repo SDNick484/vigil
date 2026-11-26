@@ -9,9 +9,10 @@ is read; the `CF_Authorization` cookie is not). `AccessVerifier.verify` accepts 
 - `aud` names one of `aud`, `iss` is `https://<team_domain>`, and `exp` and `iat` are there;
 - `exp` is not past, and `iat` and `nbf` (when present) are not ahead, of the verifier's clock,
   with `LEEWAY` seconds either way;
-- its identity is listed: a user's `email` claim (any case) in `emails` gets `full`; a service
-  token's `common_name` claim (Access sets it to the token's client ID) gets the scope configured
-  for that client ID.
+- its identity is listed: a user's `email` claim (any case) in `emails` gets `full` (marked
+  `browser`: the guard then asks a request that changes something for this service's `Origin`);
+  a service token's `common_name` claim (Access sets it to the token's client ID) gets the scope
+  configured for that client ID.
 
 Anything else is refused, with the reason as text (the guard answers 403 with it).
 
@@ -240,7 +241,7 @@ class AccessVerifier:
         email = claims.get("email")
         if isinstance(email, str) and email:
             if email.lower() in self.config.emails:
-                return Grant("full")
+                return Grant("full", browser=True)
             return f"identity not allowed: {_shown(email)}"
         client_id = claims.get("common_name")
         if isinstance(client_id, str) and client_id:

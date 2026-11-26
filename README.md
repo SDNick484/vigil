@@ -606,6 +606,43 @@ no proxy headers is indistinguishable from a local client. A TLS proxy should al
 Tailscale the connection is encrypted already; anywhere else, put an HTTPS proxy in front, or the
 token crosses the network in the clear.
 
+**Behind Cloudflare Access** (a Cloudflare Tunnel, `cloudflared`, publishing vigil under a public
+name), let Access decide who gets in, and have vigil check that it did. Add the public name to
+`server.allowed_hosts` and an `[server.access]` table (the names below are placeholders):
+
+    [server]
+    allowed_hosts = ["hub.example.com"]
+
+    [server.access]
+    team_domain = "example-team.cloudflareaccess.com"
+    aud = "your-application-audience-tag"
+    emails = ["author@example.com"]
+
+    [[server.access.service_tokens]]
+    client_id = "0123abcd.access"
+    scope = "push"
+    machine = "laptop"
+
+`team_domain` is your Zero Trust team domain and `aud` the application's audience (AUD) tag, both
+in the Cloudflare dashboard. Access signs every request it lets through and sends the signature
+in `Cf-Access-Jwt-Assertion`; vigil checks it against your team's public keys
+(`https://<team_domain>/cdn-cgi/access/certs`, fetched without proxies or redirects and kept for an
+hour): RS256 only, the audience and issuer, and the times (30 seconds of clock difference
+allowed). A signed-in user whose email is in `emails` (any case) can do everything (`full`); a
+service token, known by its client ID, gets the scope given for it (as for `[[server.tokens]]`).
+Anyone else gets 403.
+
+Once `[server.access]` is set, every request that may have come through a proxy needs a valid
+assertion: one carrying proxy headers, and one from a loopback address that names a host other
+than a loopback one (cloudflared on the same machine). A token is not accepted in its place, so
+nobody can reach vigil through the tunnel without passing Access. If vigil cannot fetch the keys,
+these requests get 403 until it can (it tries again at most once a minute). Requests from this
+machine to `127.0.0.1` stay local, and a direct request from another address without proxy
+headers (over Tailscale, say) still uses tokens. Browsers coming through Access see no vigil
+login page and get no vigil cookie, since Access vouches for every request; a POST still needs
+the page's own `Origin`, as vigil's pages send. `[server.access]` turns remote access on by
+itself; `server.token_file` and `[[server.tokens]]` are only needed for direct requests.
+
 ## Joining from a phone
 
 Every session vigil starts gets `--remote-control`, so you can carry on with it in the Claude app

@@ -1,7 +1,8 @@
 """Who may talk to the service. This module is the one place access is decided; route handlers
 never check it themselves.
 
-Without remote access (no `server.token_file` or `[[server.tokens]]`; the default, as in v1):
+Without remote access (no `server.token_file`, `[[server.tokens]]` or `[server.access]`; the
+default, as in v1):
 
 - The service binds to 127.0.0.1 only (`check_bind_address`).
 - Every request's `Host` must name loopback (`127.0.0.1`, `localhost` or `[::1]`, any port), so a
@@ -27,6 +28,16 @@ which a client can write):
   never opens a terminal on this machine; it returns the attach command
   (`vigil.resume.TERMINAL_ALLOWED`).
 
+With `[server.access]` (Cloudflare Access), a remote request that may have come through a proxy
+needs a valid Access assertion (`needs_assertion`): one carrying a proxy header, or one from a
+loopback address that is not local (cloudflared on this machine naming the public host), or one
+whose peer address the server did not give. For those, only the assertion counts
+(`vigil.web.access.AccessVerifier`): its identity's grant, or 403 "Cloudflare Access: <reason>";
+`Authorization` and the cookie are not looked at, so a token cannot stand in for Access, and
+there is no login page. A user's assertion is sent by the browser on its own, so the `Origin`
+rule applies to it as to the cookie; a service token's needs no `Origin`. A direct request (from
+another address, without proxy headers) uses tokens and the cookie as above.
+
 Every admitted request has a `Grant`: local requests, the cookie and the public paths are
 `full`; a bearer token has the scope it was configured with. `authorize` then decides, from one
 table, whether the grant covers the method and path (403 naming the scope needed otherwise):
@@ -37,7 +48,7 @@ table, whether the grant covers the method and path (403 naming the scope needed
 - `full`: everything else vigil's pages can do; not ingest.
 
 The guard records how a request was let in as `scope["vigil.access"]` (`local`, `bearer`,
-`cookie` or `public`) and its grant as `scope["vigil.grant"]`.
+`cookie`, `public` or `access`) and its grant as `scope["vigil.grant"]`.
 """
 
 import ipaddress
@@ -54,6 +65,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vigil.config import ServerConfig
 from vigil.resume import TERMINAL_ALLOWED
+from vigil.web.access import ASSERTION_HEADER
 from vigil.web.auth import FULL, SESSION_COOKIE, AuthError, AuthSettings, Grant, load_token
 
 BIND_ADDRESS = "127.0.0.1"
@@ -73,7 +85,7 @@ PUBLIC_PATHS = frozenset({"/login", "/logout"})
 """Paths a remote request may use without credentials (with the `Origin` rule for POST), along
 with GET and HEAD under `/static/`."""
 
-Access = Literal["local", "bearer", "cookie", "public"]
+Access = Literal["local", "bearer", "cookie", "public", "access"]
 
 ACCESS_KEY = "vigil.access"
 """Where the guard records, in the ASGI scope, how a request was let in."""
@@ -278,9 +290,60 @@ def _remote(scope: Scope, headers: Headers, host: str, auth: AuthSettings) -> Ad
     )
 
 
-def check_request(scope: Scope, auth: AuthSettings | None) -> Admitted | Refusal:
+def _host_allowed(name: str | None, auth: AuthSettings) -> bool:
+    return name is not None and (name in LOOPBACK_HOSTS or name in auth.allowed_hosts)
+
+
+def _is_local(scope: Scope, headers: Headers, name: str) -> bool:
+    """With remote access on: from a loopback address, to a loopback name, without proxy
+    headers."""
+    peer = peer_address(scope)
+    return (
+        peer is not None
+        and is_loopback_address(peer)
+        and name in LOOPBACK_HOSTS
+        and not is_forwarded(headers)
+    )
+
+
+def needs_assertion(scope: Scope, auth: AuthSettings) -> bool:
+    """Whether the request must carry a valid Cloudflare Access assertion: `[server.access]` is
+    set, the `Host` is one vigil answers on (else it is refused anyway), the request is not
+    local, and it may have come through a proxy: it carries a proxy header, or its peer is a
+    loopback address (a tunnel on this machine), or the server gave no peer address."""
+    if auth.access is None:
+        return False
+    headers = Headers(scope=scope)
+    host = headers.get("host")
+    name = host_name(host) if host is not None else None
+    if name is None or not _host_allowed(name, auth) or _is_local(scope, headers, name):
+        return False
+    peer = peer_address(scope)
+    return is_forwarded(headers) or peer is None or is_loopback_address(peer)
+
+
+def _through_access(
+    scope: Scope, headers: Headers, host: str, assertion: Grant | str | None
+) -> Admitted | Refusal:
+    """A request that needs an assertion: admitted on its grant, or refused (also when no
+    assertion was checked)."""
+    if not isinstance(assertion, Grant):
+        reason = assertion if isinstance(assertion, str) else "the assertion was not checked"
+        return _json(403, f"Cloudflare Access: {reason}")
+    safe = scope["type"] == "http" and scope["method"] in SAFE_METHODS
+    if assertion.browser and not safe and not is_same_origin(headers.get("origin"), host):
+        return _json(403, _CROSS_ORIGIN)
+    return Admitted("access", assertion)
+
+
+def check_request(
+    scope: Scope, auth: AuthSettings | None, assertion: Grant | str | None = None
+) -> Admitted | Refusal:
     """How the request in `scope` is let in and with what grant, or why it is refused (the rules
-    in this module's docstring). Whether the grant covers the request is `authorize`'s part."""
+    in this module's docstring). `assertion` is what `AccessVerifier.verify` made of the
+    request's Access assertion: its grant, or why it was refused; None when it was not checked.
+    It counts only when `needs_assertion`, and then nothing else does. Whether the grant covers
+    the request is `authorize`'s part."""
     headers = Headers(scope=scope)
     host = headers.get("host")
     if auth is None:
@@ -300,20 +363,16 @@ def check_request(scope: Scope, auth: AuthSettings | None) -> Admitted | Refusal
         return _local(scope, headers, host)
 
     name = host_name(host) if host is not None else None
-    if host is None or name is None or not (name in LOOPBACK_HOSTS or name in auth.allowed_hosts):
+    if host is None or name is None or not _host_allowed(name, auth):
         return _json(
             400,
             "invalid Host header: vigil only answers on 127.0.0.1, localhost, [::1] "
             "and server.allowed_hosts",
         )
-    peer = peer_address(scope)
-    if (
-        peer is not None
-        and is_loopback_address(peer)
-        and name in LOOPBACK_HOSTS
-        and not is_forwarded(headers)
-    ):
+    if _is_local(scope, headers, name):
         return _local(scope, headers, host)
+    if needs_assertion(scope, auth):
+        return _through_access(scope, headers, host, assertion)
     return _remote(scope, headers, host, auth)
 
 
@@ -364,7 +423,13 @@ class LoopbackGuard:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        admitted = check_request(scope, self.auth)
+        assertion: Grant | str | None = None
+        if self.auth is not None and self.auth.access is not None:
+            if needs_assertion(scope, self.auth):
+                # Off the event loop when the keys must be fetched: loopback keeps being served.
+                header = Headers(scope=scope).get(ASSERTION_HEADER)
+                assertion = await self.auth.access.verify(header)
+        admitted = check_request(scope, self.auth, assertion)
         if not isinstance(admitted, Refusal):
             # A WebSocket handshake is a GET.
             method = scope["method"] if scope["type"] == "http" else "GET"
