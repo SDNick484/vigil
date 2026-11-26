@@ -112,6 +112,7 @@ def test_ls_json_shape(vigil_env: VigilEnv, capsys: pytest.CaptureFixture[str]) 
         "last_activity_at", "message_count", "models", "previous_id", "chain_id", "machine",
         "project_key", "project_label", "transcript_path", "status",
         "remote_url", "remote_url_at", "remote_urls", "open_url", "busy",
+        "stale", "received_at", "resume_url", "machine_url",
     }  # fmt: skip
     assert named["short_id"] == NAMED[:8]
     assert named["name"] == named["title"] == "fixture-named"

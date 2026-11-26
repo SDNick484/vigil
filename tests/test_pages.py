@@ -291,7 +291,9 @@ def test_split_groups_active_first() -> None:
 
 
 def test_stale_peer_session_is_quiet() -> None:
-    stale = PeerSession(**make_row("a", "running", "a1").__dict__, peer="peer-b", stale=True)
+    stale = PeerSession(
+        **{**make_row("a", "running", "a1").__dict__, "peer": "peer-b", "stale": True}
+    )
     (group,) = group_by_project([stale])
     assert not group.active and group.idle_count == 1
     assert count_statuses([stale]) == StatusCounts(0, 0, 1, 1)

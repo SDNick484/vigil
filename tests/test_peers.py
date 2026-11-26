@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1498,3 +1499,27 @@ def test_peer_remote_urls_validated() -> None:
     assert capped is not None and len(capped.remote_urls) == 50
     absent = session_from_dict({"id": C_SESSION}, "peer-b")
     assert absent is not None and absent.remote_urls == ()
+
+
+def test_filter_sessions_since(index_db: sqlite3.Connection) -> None:
+    every = list_sessions(index_db, include_archived=True, collapse_chains=False, limit=-1)
+    remote = [session_from_dict(session_to_dict(row), "peer-b") for row in every]
+    rows = [row for row in remote if row is not None]
+    times = sorted({row.last_activity_at for row in rows if row.last_activity_at is not None})
+    assert len(times) > 2
+    boundaries = [times[0] - timedelta(seconds=1), times[1], times[-1], times[-1] + timedelta(1)]
+    for since in boundaries:
+        for collapse in (False, True):
+            expected = list_sessions(
+                index_db, since=since, include_archived=True, collapse_chains=collapse, limit=-1
+            )
+            got = filter_sessions(
+                rows, since=since, include_archived=True, collapse_chains=collapse
+            )
+            assert [r.session_id for r in got] == [r.session_id for r in expected], (
+                since,
+                collapse,
+            )
+    naive = times[1].replace(tzinfo=None)
+    assert filter_sessions(rows, since=naive) == filter_sessions(rows, since=times[1])
+    assert len(filter_sessions(rows, since=times[-1] + timedelta(1))) == 0

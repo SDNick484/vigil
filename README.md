@@ -383,6 +383,18 @@ Each session has the same fields as `vigil ls --json` (and `vigil show --json` f
 | `open_url` | The link to join the session by right now: `remote_url` when the session is live and the link is from its current run; else null (also when live sessions are not known). |
 | `busy` | `true` when the session is live and working on something right now. |
 | `status` | `running` (open in a terminal), `background`, `idle`, or `unknown` when the installed `claude` cannot list live sessions. Refreshed at most every 5 seconds. |
+| `stale` | `true` when the machine the session is on could not be reached (a [peer](#peers)) or heard from lately (a hub's machine): the session is then its last-known state. Always `false` on a vigil with no peers or hub machines. |
+| `received_at` | On a hub, when it accepted the snapshot the session came from (ISO 8601 in UTC); null elsewhere. |
+| `resume_url` | On a hub with `hub_mode.public_url`, the session's page on the hub (`<public_url>/machines/<name>/sessions/<id>`); null elsewhere. |
+| `machine_url` | On a hub, the URL of the owning machine's own vigil (`url` of its `[[machines]]` entry); null when none is configured, and elsewhere. |
+
+On a hub, `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}` and `GET /api/v1/projects` read what
+the machines pushed, across all of them, with the same parameters as above (`machine` names the
+owner; `chain` of one session holds only that session, since a snapshot has one session per
+chain). Once a machine has not been heard from within `hub_mode.stale_after` seconds, its
+sessions are served as it last sent them with `stale: true`, and `open_url` null, `busy` false
+and `status` `unknown`; `remote_url` is kept. `resume_command` is the same `cd <folder> && claude
+--resume <id>` as elsewhere, to run on the owning machine. `GET /api/v1/peers` is `[]`.
 
 These actions change things. They are POST only, sit outside `/api/v1`, and are for vigil's own
 pages:

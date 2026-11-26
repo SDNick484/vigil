@@ -127,14 +127,13 @@ templates.env.globals["wall_clock"] = wall_clock
 
 
 def _stale(row: SessionRow) -> bool:
-    return isinstance(row, PeerSession) and row.stale
+    return row.stale
 
 
 def is_active(row: SessionRow) -> bool:
     """Whether `row` is running or in the background right now. A stale peer row is what the peer
     last sent, not what is happening, so it is never active."""
-    stale = isinstance(row, PeerSession) and row.stale
-    return row.status in ("running", "background") and not stale
+    return row.status in ("running", "background") and not row.stale
 
 
 templates.env.globals["is_active"] = is_active
