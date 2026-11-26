@@ -767,6 +767,171 @@ Peers do not list each other's peers: each one serves only its own sessions, so 
 list each other. Over plain `http://` the token crosses the network in the clear, which is fine
 over Tailscale (encrypted already); anywhere else, use an `https://` URL.
 
+## Hub
+
+A **hub** is a vigil that lists the sessions of all your machines in one always-on place. Each
+machine pushes a snapshot of its recent sessions (and a heartbeat every minute) to the hub, which
+keeps the last snapshot of each one, so a machine that is asleep or off still shows, marked
+**stale**. Other tools read the hub through the same `/api/v1` as any vigil (`/api/v1/sessions`,
+`/api/v1/machines`), and a browser gets the sessions page with a Machine column. The hub is meant
+to sit on a small server and be reached from anywhere, for instance through a Cloudflare Tunnel
+with [Cloudflare Access](#remote-access) in front.
+
+A hub is not another place to work. It indexes nothing itself, has no Claude home, never runs
+`claude` (no Resume, Restart, Review or Apply on it; those pages answer 404), and never connects
+to a machine: machines connect to it. It differs from [peers](#peers) in direction (peers are
+fetched on demand by a machine that can reach them, a hub is pushed to) and in credentials: a
+machine's `push` token can only store that machine's sessions, where a peer's token can do
+everything its vigil can. A machine can have peers and push to a hub at once.
+
+### Install a hub on Alpine
+
+[`deploy/alpine/`](deploy/alpine/) installs a hub on Alpine Linux with OpenRC. Alpine's stable
+Python is older than the 3.14 vigil needs, so the script installs `uv`, has it fetch a standalone
+CPython 3.14 for musl into `/opt/vigil/python`, and builds a venv in `/opt/vigil/venv`. From a
+clone of this repository, as root (`--dry-run` prints what it would do and changes nothing):
+
+    sh deploy/alpine/install.sh --dry-run
+    sh deploy/alpine/install.sh
+
+It creates the system user `vigil`; `/etc/vigil` (root:vigil, 0750) with a placeholder
+`config.toml` copied from `config.example.toml` when there is none; `/var/lib/vigil` (vigil, 0700)
+for the data; and `/etc/init.d/vigil`, which runs `vigil serve` as `vigil` with
+`XDG_CONFIG_HOME=/etc` and `XDG_DATA_HOME=/var/lib`. Run it again to upgrade: it replaces the code
+and keeps the config and the data. `--from` takes another checkout or a pip requirement, e.g.
+`--from 'vigil-sessions @ git+https://github.com/SDNick484/vigil'`. It does not start anything.
+Edit the config first (below), then:
+
+    rc-update add vigil default
+    rc-service vigil start
+    curl -s 127.0.0.1:7787/api/v1/health      # "mode":"hub"
+
+The log is `/var/log/vigil.log`. Any placeholder left in the config will fail or lock you out,
+so replace them all.
+
+### The hub's config
+
+`/etc/vigil/config.toml` (names below are placeholders; see
+[`config.example.toml`](deploy/alpine/config.example.toml)):
+
+    mode = "hub"
+
+    [hub_mode]
+    public_url = "https://hub.example.com"
+
+    [[machines]]
+    name = "laptop"
+    url = "http://laptop.example-tailnet.ts.net:7787"
+
+    [server]
+    bind = "127.0.0.1"
+    allowed_hosts = ["hub.example.com"]
+
+`mode = "hub"` turns hub mode on; `public_url` is the address the hub's pages are reached at (for
+`resume_url`). Each `[[machines]]` entry names a machine allowed to push: a push for any other
+name is refused. Its `url` is that machine's own vigil, used only to build the "Resume on laptop"
+link (the hub never connects to it); leave it out if the machine is not reachable from where you
+browse. The rest of the table, `hub_mode.stale_after` included, is in
+[Configuration](#configuration). The hub binds `127.0.0.1` for the tunnel's connector to reach;
+credentials for it are set up below.
+
+### Push from a machine
+
+On each machine, give vigil the name the hub knows it by (the `name` of its `[[machines]]` entry)
+and the hub to push to. With `[hub]` set, `vigil serve` pushes the machine's sessions when they
+change, at most every 5 seconds, a heartbeat every minute, and backs off (5 seconds, doubling to
+5 minutes) while the hub cannot be reached. The machine's serving carries on regardless.
+
+    machine = "laptop"
+
+    [hub]
+    url = "https://hub.example.com"
+    access_client_id = "0123abcd.access"
+    access_secret_file = "~/.config/vigil/hub-secret"
+
+`machine` must be 1 to 63 letters, digits, `-` and `_`. For a hub that is not behind Access, use a
+`push` token instead of the last two keys: `token_file = "~/.config/vigil/hub.token"`, a file
+holding the token the hub lists in `[[server.tokens]]` with `scope = "push"` and
+`machine = "laptop"` (see [Scopes](#remote-access)). Give one credential or the other. Both files
+must be mode 0600 and are sent only to `hub.url` (no redirects, no proxy settings). `vigil serve`
+shows the last push, and the last error, under `hub` in `GET /api/v1/health`.
+
+### Cloudflare Access setup
+
+With a Cloudflare Tunnel publishing the hub as `hub.example.com`, Access decides who gets in and
+the hub checks that it did ([Behind Cloudflare Access](#remote-access) says how the check works).
+In the Cloudflare Zero Trust dashboard:
+
+1. Create a **self-hosted application** for `hub.example.com`. Copy its **AUD tag**.
+2. Add a **policy** that allows your email (action *Allow*), and a second policy for the machines
+   with action *Service Auth* (it lets a service token through without a sign-in).
+3. Create one **service token** per machine. Keep each one's client ID (`<id>.access`) and secret:
+   the secret is shown once.
+
+Then in the hub's config (placeholders):
+
+    [server.access]
+    team_domain = "example-team.cloudflareaccess.com"
+    aud = "the-application-aud-tag"
+    emails = ["author@example.com"]
+
+    [[server.access.service_tokens]]
+    client_id = "0123abcd.access"
+    scope = "push"
+    machine = "laptop"
+
+`team_domain` is your Zero Trust team domain, `aud` the tag from step 1, and `emails` the people
+who may browse the hub. Each service token's client ID goes into a
+`[[server.access.service_tokens]]` entry with `scope = "push"` and its `machine`: it then has no
+use for any other machine's name. The secret goes into the file `hub.access_secret_file` of that
+machine (`chmod 600`). Once `[server.access]` is set, a proxied request needs a valid assertion;
+a bearer token is not accepted in its place.
+
+### Scopes
+
+| Who | Credential | Scope | May |
+| --- | --- | --- | --- |
+| You, in a browser | Access sign-in, email in `server.access.emails` | `full` | Browse the hub's pages: sessions list, session pages, `/api/v1`. Not ingest. |
+| A machine | Access service token, or a `[[server.tokens]]` token, with its `machine` | `push` | `PUT /ingest/{name}/sessions` and `POST /ingest/{name}/heartbeat` for that machine only. |
+| A reader (a dashboard, a script) | Access service token with `scope = "read"`, or a `read` `[[server.tokens]]` token | `read` | `GET` and `HEAD` on `/api/v1/*` only. |
+| A program on the hub itself | None: requests from `127.0.0.1` | `full` | Everything but ingest. |
+
+Anything outside a credential's scope gets 403 naming the scope it needs. A reader needs no page
+access:
+
+    curl -s -H "CF-Access-Client-Id: $CLIENT_ID" -H "CF-Access-Client-Secret: $CLIENT_SECRET" \
+        'https://hub.example.com/api/v1/sessions?machine=laptop'
+    curl -s -H "CF-Access-Client-Id: $CLIENT_ID" -H "CF-Access-Client-Secret: $CLIENT_SECRET" \
+        https://hub.example.com/api/v1/machines
+
+`/api/v1/sessions` lists every machine's sessions, with `machine`, `stale`, `received_at`,
+`open_url`, `resume_url` and `machine_url` set; `/api/v1/machines` lists the machines with when
+each was last heard from and whether it is stale. Add a service token with `scope = "read"` (no
+`machine`) to `[[server.access.service_tokens]]` for such a reader, or for a client that does not
+come through Access, a `read` token in `[[server.tokens]]`. The Access policy for the reader's
+service token must allow it (*Service Auth*) like the machines'.
+
+### Resume on a machine
+
+A hub cannot resume anything, so its session page hands off. For a session on `laptop`, the page
+offers, as the session allows:
+
+- **Join the running session**, the session's Remote Control link, when it is live and has one
+  (a machine marked stale offers none, since the link is old).
+- **Resume on laptop**, a link to that machine's own vigil (`machines[].url`), which then offers
+  its normal Resume. It needs you to reach that address from where you are browsing, over
+  Tailscale for instance.
+- **Last Remote Control link**, which works only if the session is still running.
+- **The command** `cd <folder> && claude --resume <id>` with a Copy button, to run on the
+  machine.
+
+The login cookie vigil sets when a browser signs in with a `full` token (a hub reached directly,
+not through Access, which needs no vigil login) is `SameSite=Lax`, so following a link from the
+hub to a machine's vigil, or from another site to a vigil you are signed in to, opens it signed in
+instead of at the login page, which a stricter cookie would not allow on a cross-site navigation.
+State-changing requests still need the page's own `Origin`, so another site cannot act with the
+cookie.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
