@@ -148,6 +148,24 @@ class HubMachine:
 
 
 @dataclass(frozen=True)
+class HubClientConfig:
+    """`[hub]`: the hub this machine pushes its sessions to (`vigil.push`), with one kind of
+    credential: a bearer token (`token_file`) or a Cloudflare Access service token
+    (`access_client_id` and `access_secret_file`)."""
+
+    url: str
+    """The hub's base URL, `http(s)://host[:port]` with no path; credentials go only there."""
+    token_file: Path | None = None
+    """A file holding the hub's `push` token for this machine (a hub reached directly)."""
+    access_client_id: str | None = None
+    """An Access service token's client ID (`<id>.access`), sent as `CF-Access-Client-Id`."""
+    access_secret_file: Path | None = None
+    """A file holding that service token's secret, sent as `CF-Access-Client-Secret`."""
+    live_interval: int = 900
+    """Seconds, 60 to 3600, between the push loop's own probes of live state."""
+
+
+@dataclass(frozen=True)
 class Config:
     claude_home: Path = field(default_factory=lambda: Path.home() / ".claude")
     port: int = 7787
@@ -163,6 +181,8 @@ class Config:
     """Only set (`[hub_mode]`) with `mode = "hub"`."""
     machines: tuple[HubMachine, ...] = ()
     """Only set (`[[machines]]`) with `mode = "hub"`."""
+    hub: HubClientConfig | None = None
+    """The hub to push this machine's sessions to (`[hub]`); never set with `mode = "hub"`."""
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -608,12 +628,70 @@ def _parse_machines(raw: dict[str, Any]) -> tuple[HubMachine, ...]:
     return tuple(machines)
 
 
+def _parse_hub_client(raw: dict[str, Any], machine: str | None) -> HubClientConfig | None:
+    """`[hub]`, or None when it is not there. It needs `machine` set to a machine name (the name
+    the hub knows this machine by) and exactly one credential."""
+    if "hub" not in raw:
+        return None
+    table = _table(raw, "hub")
+    _check_keys(
+        table,
+        {"url", "token_file", "access_client_id", "access_secret_file", "live_interval"},
+        "hub",
+    )
+    if "url" not in table:
+        raise ConfigError("`hub.url` is missing")
+    url = _peer_url(table["url"], "hub")
+    if machine is None:
+        raise ConfigError("`machine` must be set with [hub]: it is the name this machine pushes as")
+    check_machine_name(machine, "machine")
+    token_file = (
+        _token_path(table["token_file"], "hub.token_file") if "token_file" in table else None
+    )
+    client_id: str | None = None
+    if "access_client_id" in table:
+        client_id = table["access_client_id"]
+        if not _single_word(client_id) or len(cast(str, client_id)) > 255:
+            raise ConfigError("`hub.access_client_id` must be the service token's client ID")
+    secret_file = (
+        _token_path(table["access_secret_file"], "hub.access_secret_file")
+        if "access_secret_file" in table
+        else None
+    )
+    if (client_id is None) != (secret_file is None):
+        raise ConfigError(
+            "`hub.access_client_id` and `hub.access_secret_file` go together: give both or neither"
+        )
+    if (token_file is None) == (client_id is None):
+        raise ConfigError(
+            "[hub] needs one credential: `hub.token_file`, or `hub.access_client_id` with "
+            "`hub.access_secret_file` (not both)"
+        )
+    live_interval = HubClientConfig.live_interval
+    if "live_interval" in table:
+        value = table["live_interval"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 60 <= value <= 3600:
+            raise ConfigError("`hub.live_interval` must be an integer from 60 to 3600")
+        live_interval = value
+    return HubClientConfig(
+        url=url,
+        token_file=token_file,
+        access_client_id=client_id,
+        access_secret_file=secret_file,
+        live_interval=live_interval,
+    )
+
+
 def _check_mode(raw: dict[str, Any], mode: Mode) -> None:
-    """Refuse settings that do not go with `mode`: peers on a hub; `[hub_mode]` and
+    """Refuse settings that do not go with `mode`: peers and `[hub]` on a hub; `[hub_mode]` and
     `[[machines]]` anywhere else."""
     if mode == "hub":
         if raw.get("peers"):
             raise ConfigError('`peers` cannot be used with `mode = "hub"`')
+        if "hub" in raw:
+            raise ConfigError(
+                '`hub` ([hub]) cannot be used with `mode = "hub"`: a hub pushes nowhere'
+            )
         return
     for key, name in (("hub_mode", "[hub_mode]"), ("machines", "[[machines]]")):
         if key in raw:
@@ -630,7 +708,9 @@ def load_config(path: Path | None = None) -> Config:
     team domain and audience tags (or with a service token like a bad `[[server.tokens]]` entry,
     or a client ID listed twice), a `peers` entry without a valid name, URL and token file path,
     a `mode` other than `local` or `hub`, `peers` with `mode = "hub"`, `[hub_mode]` or
-    `[[machines]]` without it, or a `[[machines]]` entry without a valid, unique name.
+    `[[machines]]` without it, a `[[machines]]` entry without a valid, unique name, or a `[hub]`
+    without a valid URL, exactly one credential, a `live_interval` of 60 to 3600 and `machine`
+    set to a machine name (`MACHINE_NAME`), or with `mode = "hub"`.
     """
     path = path if path is not None else config_path()
     try:
@@ -655,6 +735,7 @@ def load_config(path: Path | None = None) -> Config:
             "mode",
             "hub_mode",
             "machines",
+            "hub",
         },
         "",
     )
@@ -684,4 +765,5 @@ def load_config(path: Path | None = None) -> Config:
         mode=mode,
         hub_mode=_parse_hub_mode(raw),
         machines=_parse_machines(raw),
+        hub=_parse_hub_client(raw, machine),
     )

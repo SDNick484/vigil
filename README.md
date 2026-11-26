@@ -298,7 +298,7 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `server.access.service_tokens[].client_id` | required | The service token's client ID (`<id>.access`). Each may be listed once. |
 | `server.access.service_tokens[].scope` | required | What the service token may do: `"read"`, `"push"` or `"full"`. |
 | `server.access.service_tokens[].machine` | unset | As `server.tokens[].machine`: required for `"push"`, not allowed otherwise. |
-| `machine` | host name | What the machine column calls this machine when [peers](#peers) are listed. 1 to 63 printable characters. |
+| `machine` | host name | What the machine column calls this machine when [peers](#peers) are listed. 1 to 63 printable characters. With `[hub]` it is required and is the name this machine pushes as: 1 to 63 letters, digits, `-` and `_`. |
 | `peers` | `[]` | Other machines' vigil services whose sessions this one lists, as `[[peers]]` tables; see [Peers](#peers). |
 | `peers[].name` | required | The peer's name in the machine column and in URLs: 1 to 63 letters, digits, `-` and `_`. Unique, and not the same as `machine`. |
 | `peers[].url` | required | The peer's vigil, `http(s)://host[:port]` with no path, e.g. `"http://desktop.example-tailnet.ts.net:7787"`. |
@@ -309,6 +309,12 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `machines` | `[]` | Only with `mode = "hub"`: the machines allowed to push to this hub, as `[[machines]]` tables. A push for any other name is refused. |
 | `machines[].name` | required | The name the machine pushes as: 1 to 63 letters, digits, `-` and `_`, unique. A `push` token for it names the same machine. |
 | `machines[].url` | unset | The machine's own vigil, `http(s)://host[:port]` with no path, e.g. `"http://laptop.example-tailnet.ts.net:7787"`; used for links only, the hub never connects to it. |
+| `hub` | unset | A hub to push this machine's sessions to, as a `[hub]` table: `vigil serve` sends them when they change (at most every 5 seconds) and a heartbeat every minute. Needs `machine`; not allowed with `mode = "hub"`. |
+| `hub.url` | required | The hub, `http(s)://host[:port]` with no path, e.g. `"https://hub.example.com"`. Credentials are sent there and nowhere else; redirects are not followed. |
+| `hub.token_file` | unset | File holding the hub's `push` token for this machine, sent as `Authorization: Bearer` (a hub reached directly). Same rules as `server.token_file`. Give this or the Access pair below, not both. |
+| `hub.access_client_id` | unset | A Cloudflare Access service token's client ID, sent as `CF-Access-Client-Id` (a hub behind Access). Needs `hub.access_secret_file`. |
+| `hub.access_secret_file` | unset | File holding that service token's secret, sent as `CF-Access-Client-Secret`. Same rules as `server.token_file`. |
+| `hub.live_interval` | `900` | Seconds, 60 to 3600, between the push loop's own checks of which sessions are live (`claude agents --json`); a check made for a page in between is used too. |
 
 Example:
 
