@@ -303,6 +303,12 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `peers[].name` | required | The peer's name in the machine column and in URLs: 1 to 63 letters, digits, `-` and `_`. Unique, and not the same as `machine`. |
 | `peers[].url` | required | The peer's vigil, `http(s)://host[:port]` with no path, e.g. `"http://desktop.example-tailnet.ts.net:7787"`. |
 | `peers[].token_file` | required | File holding that peer's access token (its own `server.token_file` token). Same rules: an absolute path (a leading `~` is expanded) to a file you own with mode 0600 or 0400. |
+| `mode` | `"local"` | `"hub"` makes this vigil a hub: it indexes nothing, never runs `claude`, needs no Claude home, and keeps the sessions the machines in `machines` push to it (`PUT /ingest/{name}/sessions`, see [API](#api)). Not allowed together with `peers`. |
+| `hub_mode.public_url` | unset | Only with `mode = "hub"`: the hub's public address, `https://host[:port]` with no path, e.g. `"https://hub.example.com"`; used to build links to the hub's pages. |
+| `hub_mode.stale_after` | `180` | Only with `mode = "hub"`: seconds, 30 to 3600, after which a machine that has neither pushed nor sent a heartbeat is shown as stale. |
+| `machines` | `[]` | Only with `mode = "hub"`: the machines allowed to push to this hub, as `[[machines]]` tables. A push for any other name is refused. |
+| `machines[].name` | required | The name the machine pushes as: 1 to 63 letters, digits, `-` and `_`, unique. A `push` token for it names the same machine. |
+| `machines[].url` | unset | The machine's own vigil, `http(s)://host[:port]` with no path, e.g. `"http://laptop.example-tailnet.ts.net:7787"`; used for links only, the hub never connects to it. |
 
 Example:
 
