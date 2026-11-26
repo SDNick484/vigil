@@ -546,6 +546,30 @@ keeps the DNS rebinding defence.
 
     curl -H "Authorization: Bearer $(cat ~/.config/vigil/token)" http://100.64.0.1:7787/api/v1/sessions
 
+**Scopes.** The token in `server.token_file` can do everything. For a tool that should do less,
+such as a dashboard that only reads, or a machine pushing its sessions to a hub, add more tokens,
+each in its own file and each with a scope:
+
+| Scope | Allows |
+| --- | --- |
+| `read` | `GET` and `HEAD` on `/api/v1/*` only. |
+| `push` | `PUT /ingest/{name}/sessions` and `POST /ingest/{name}/heartbeat` for its bound `name` only. |
+| `full` | Everything vigil's own pages can do (and, on a hub, browsing its pages). Not ingest. |
+
+    [[server.tokens]]
+    file = "~/.config/vigil/dashboard.token"
+    scope = "read"
+
+    [[server.tokens]]
+    file = "~/.config/vigil/laptop-push.token"
+    scope = "push"
+    machine = "laptop"
+
+Any of them turns remote access on, as `server.token_file` does; each file follows the same rules,
+and two entries holding the same token stop vigil with an error. A request its token does not
+cover gets 403 naming the scope it needs. Only a `full` token logs a browser in. Local requests
+need no token and can do everything but ingest.
+
 **Browsers** are sent to `/login`, where you paste the token once. vigil then sets a session
 cookie (`vigil_session`) that lasts 30 days: HttpOnly, SameSite=Strict, and Secure when the page
 came over HTTPS. Because it is SameSite=Strict, following a link to vigil from another site shows
