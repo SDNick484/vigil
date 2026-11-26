@@ -393,7 +393,6 @@ def hub_app(hub_env: HubEnv) -> FastAPI:
 import uuid  # noqa: E402
 from collections.abc import Callable  # noqa: E402
 from datetime import UTC, datetime, timedelta  # noqa: E402
-from typing import Any  # noqa: E402
 
 import vigil  # noqa: E402
 from vigil.index.queries import SessionRow  # noqa: E402
