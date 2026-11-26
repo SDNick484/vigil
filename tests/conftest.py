@@ -297,3 +297,173 @@ class CertsServer(httpx.MockTransport):
         if self.redirect is not None:
             return httpx.Response(302, headers={"Location": self.redirect})
         return httpx.Response(200, json={"keys": self.jwks})
+
+
+# Hub mode (vigil hub, Task 9).
+from fastapi import FastAPI  # noqa: E402
+
+FULL = "hub-full-token-placeholder-" + "0" * 16
+"""The hub's `server.token_file` token (scope `full`). Every hub token is a placeholder."""
+READ = "hub-read-token-placeholder-" + "1" * 16
+PUSH_LAPTOP = "hub-push-laptop-placeholder-" + "2" * 16
+PUSH_DESK = "hub-push-desk-placeholder-" + "3" * 16
+PUSH_GHOST = "hub-push-ghost-placeholder-" + "4" * 16
+"""A `push` token for `ghost`, a machine the hub's `[[machines]]` does not list."""
+HUB_HOST = "hub.example.com"
+
+
+@dataclass(frozen=True)
+class HubEnv:
+    """A hub's world, all under tmp: its config file, its data folder and fakes on PATH."""
+
+    config_path: Path
+    data_dir: Path
+    bin: FakeBin
+
+
+def _hub_token(directory: Path, name: str, token: str) -> Path:
+    path = directory / name
+    path.write_text(token + "\n")
+    path.chmod(0o600)
+    return path
+
+
+@pytest.fixture
+def hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: FakeBin) -> HubEnv:
+    """A vigil in hub mode: machines `laptop` (with a URL) and `desk`, a full `token_file`, a
+    read token and push tokens for `laptop`, `desk` and the unlisted `ghost`, `HUB_HOST`
+    allowed. Its `claude_home` does not exist, and a fake `claude` is installed so a test can
+    assert it was never run."""
+    root = tmp_path / "hub_env"  # apart from `vigil_env`'s, so a test can have both
+    config_home = root / "xdg_config"
+    data_home = root / "xdg_data"
+    tokens = root / "tokens"
+    (config_home / "vigil").mkdir(parents=True)
+    tokens.mkdir()
+    entries: list[tuple[str, str, str, str | None]] = [
+        ("read", READ, "read", None),
+        ("laptop", PUSH_LAPTOP, "push", "laptop"),
+        ("desk", PUSH_DESK, "push", "desk"),
+        ("ghost", PUSH_GHOST, "push", "ghost"),
+    ]
+    server = [
+        "[server]",
+        f'allowed_hosts = ["{HUB_HOST}"]',
+        f'token_file = "{_hub_token(tokens, "full", FULL)}"',
+    ]
+    for name, token, scope, machine in entries:
+        server += ["", "[[server.tokens]]", f'file = "{_hub_token(tokens, name, token)}"']
+        server += [f'scope = "{scope}"'] + ([f'machine = "{machine}"'] if machine else [])
+    config = config_home / "vigil" / "config.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'mode = "hub"',
+                f'claude_home = "{root / "no-claude-home"}"',
+                "",
+                "[hub_mode]",
+                f'public_url = "https://{HUB_HOST}"',
+                "",
+                *server,
+                "",
+                "[[machines]]",
+                'name = "laptop"',
+                'url = "http://laptop.example.com:7787"',
+                "",
+                "[[machines]]",
+                'name = "desk"',
+                "",
+            ]
+        )
+    )
+    monkeypatch.setenv("HOME", str(root / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    fake_bin.install("claude", stdout="2.1.312 (Claude Code)\n")
+    return HubEnv(config, data_home / "vigil", fake_bin)
+
+
+@pytest.fixture
+def hub_app(hub_env: HubEnv) -> FastAPI:
+    """The service in hub mode (`hub_env`), as `vigil serve` builds it: no index, no watcher."""
+    return create_app(load_config(hub_env.config_path))
+
+
+# Ingest (vigil hub, Task 12).
+import uuid  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+import vigil  # noqa: E402
+from vigil.index.queries import SessionRow  # noqa: E402
+from vigil.serialize import session_to_dict  # noqa: E402
+
+HUB_REMOTE_PEER = ("192.0.2.10", 50000)  # TEST-NET-1: never a real client
+HUB_URL = f"http://{HUB_HOST}"
+
+
+@pytest.fixture
+def hub_client_for(hub_app: FastAPI) -> Iterator[Callable[..., TestClient]]:
+    """Make clients of `hub_app` from another machine (`HUB_REMOTE_PEER`, `HUB_URL`), each
+    sending `token` (one of the hub token constants) as its bearer token. The app's lifespan
+    runs while they are open."""
+    clients: list[TestClient] = []
+
+    def make(token: str, **kwargs: Any) -> TestClient:
+        kwargs.setdefault("follow_redirects", False)
+        client = TestClient(
+            hub_app,
+            base_url=HUB_URL,
+            client=HUB_REMOTE_PEER,
+            headers={"Authorization": f"Bearer {token}"},
+            **kwargs,
+        )
+        client.__enter__()
+        clients.append(client)
+        return client
+
+    yield make
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+def snapshot_body(
+    machine: str = "laptop", sessions: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """A snapshot `machine` would push (`PUT /ingest/{machine}/sessions`): `sessions` as given,
+    else two placeholder sessions built with `session_to_dict` (ids derived from `machine`)."""
+    if sessions is None:
+        at = datetime(2026, 11, 25, 18, 0, tzinfo=UTC)
+        sessions = []
+        for number in range(2):
+            session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"vigil-test/{machine}/{number}"))
+            row = SessionRow(
+                session_id=session_id,
+                cwd="/home/user/src/app",
+                git_branch="main",
+                version="2.1.312",
+                title=f"placeholder {number}",
+                first_prompt="hello",
+                last_user="hello",
+                last_assistant="hi",
+                started_at=at - timedelta(hours=1 + number),
+                last_activity_at=at - timedelta(minutes=10 * number),
+                message_count=2,
+                previous_session_id=None,
+                machine=machine,
+                project_key="/home/user/src/app",
+                project_label="app",
+                chain_id=session_id,
+                transcript_path=f"/home/user/.claude/projects/-home-user-src-app/{session_id}.jsonl",
+                models=("claude-placeholder",),
+                status="idle",
+            )
+            sessions.append(session_to_dict(row))
+    return {
+        "format": 1,
+        "machine": machine,
+        "generated_at": "2026-11-25T18:04:05Z",
+        "vigil_version": vigil.__version__,
+        "live_checked_at": None,
+        "sessions": sessions,
+    }

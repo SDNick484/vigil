@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from markupsafe import escape
 from pydantic import BaseModel
@@ -84,7 +84,7 @@ from vigil.review.runner import (
 )
 from vigil.review.schema import Kind, Suggestion, clean
 from vigil.review.store import Review, get_review, list_reviews, review_to_dict
-from vigil.web import WebState, connection, state
+from vigil.web import WebState, connection, local_only, state
 from vigil.web.api import (
     ForwardedResumeOut,
     RefusalOut,
@@ -98,7 +98,7 @@ from vigil.web.pages import _token_numbers, templates
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(tags=["review"])
+router = APIRouter(tags=["review"], dependencies=[Depends(local_only)])
 
 STOP_POLLING = 286
 """The status that tells htmx to stop polling an element."""

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -45,7 +45,7 @@ from vigil.review.numbers import SessionNumbers, compute_numbers, wall_clock
 from vigil.review.store import list_reviews
 from vigil.serialize import apply_status, display_name
 from vigil.usage import build_report, refresh_sources
-from vigil.web import connection, state
+from vigil.web import connection, local_only, state
 
 router = APIRouter(tags=["pages"])
 
@@ -282,7 +282,9 @@ def _token_numbers(row: SessionRow, flags: list[str]) -> SessionNumbers | None:
     return numbers if numbers.turns else None
 
 
-@router.get("/sessions/{session_id}", response_class=HTMLResponse)
+@router.get(
+    "/sessions/{session_id}", response_class=HTMLResponse, dependencies=[Depends(local_only)]
+)
 def session_page(request: Request, session_id: str) -> Any:
     """Everything indexed about one session, its last exchange, where its tokens went (read from
     the transcript now), its reviews (newest first) with Review this session, the command that
@@ -370,7 +372,7 @@ def peer_session_page(request: Request, peer: str, session_id: str) -> Any:
     return _render(request, "session_detail.html", context)
 
 
-@router.get("/usage", response_class=HTMLResponse)
+@router.get("/usage", response_class=HTMLResponse, dependencies=[Depends(local_only)])
 def usage_page(request: Request, project: Annotated[str, Query()] = "") -> Any:
     """What you use inside sessions (optionally for one project), how you launch `claude`, and the
     flags and subcommands of the installed version you have never tried."""

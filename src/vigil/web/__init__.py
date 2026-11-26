@@ -4,6 +4,9 @@ POST actions (`api`), and the transcript watcher (`watcher`).
 What route modules share lives here: `state(request)` gives the service's `WebState`, and
 `connection(request)` opens an index connection for the length of a `with` block. Open the
 connection inside the handler that uses it: sqlite3 connections belong to the thread that made them.
+
+In hub mode (`mode = "hub"`) there is no index and `claude` is never run: routes that need either
+depend on `local_only` (404 on a hub), and the hub's own routes on `hub_only` (404 elsewhere).
 """
 
 import sqlite3
@@ -15,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from vigil.claude_cli import (
     Capabilities,
@@ -25,6 +28,7 @@ from vigil.claude_cli import (
     live_sessions_or_none,
 )
 from vigil.config import Config, load_config
+from vigil.hub import HubStore
 from vigil.peers import PeerHub
 from vigil.review.runner import ReviewSlot
 
@@ -84,6 +88,8 @@ class WebState:
     """The configured peers (v2) and their latest sessions."""
     review_slot: ReviewSlot = field(default_factory=ReviewSlot)
     """Taken while a session review runs: one at a time (`vigil.web.review`)."""
+    hub: HubStore | None = None
+    """The machines' snapshots; set only in hub mode (`mode = "hub"`)."""
 
     def reload_config(self) -> None:
         """Re-read the config file (`vigil.paths.config_path`, where `vigil serve` reads it) after
@@ -106,3 +112,15 @@ def connection(request: Request) -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+def local_only(request: Request) -> None:
+    """A route dependency: 404 on a hub, for routes that run `claude` or need the index."""
+    if state(request).config.mode == "hub":
+        raise HTTPException(status_code=404, detail="not available on a hub")
+
+
+def hub_only(request: Request) -> None:
+    """A route dependency: 404 unless this vigil is a hub (`mode = "hub"`)."""
+    if state(request).config.mode != "hub":
+        raise HTTPException(status_code=404, detail="only available on a hub")

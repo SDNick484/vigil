@@ -13,6 +13,10 @@ from vigil.paths import config_path
 
 Launcher = Literal["auto", "bg", "tmux"]
 
+Mode = Literal["local", "hub"]
+"""What a vigil is: `local` indexes this machine's sessions; `hub` indexes nothing and keeps the
+sessions machines push to it (`vigil.hub`), and never runs `claude`."""
+
 AccessScope = Literal["read", "push", "full"]
 """What a remote credential may do (`vigil.web.security.authorize`): `read` is GET and HEAD on
 `/api/v1/*`; `push` is a hub's ingest for one machine; `full` is everything vigil's pages do."""
@@ -122,6 +126,28 @@ class Peer:
 
 
 @dataclass(frozen=True)
+class HubModeConfig:
+    """`[hub_mode]`: settings of a vigil with `mode = "hub"`."""
+
+    public_url: str | None = None
+    """The hub's public base URL, `https://host[:port]` with no path (for `resume_url`)."""
+    stale_after: int = 180
+    """Seconds, 30 to 3600, after which a machine that has not pushed or sent a heartbeat is
+    stale."""
+
+
+@dataclass(frozen=True)
+class HubMachine:
+    """One `[[machines]]` entry: a machine allowed to push its sessions to this hub."""
+
+    name: str
+    """The name it pushes as (`/ingest/{name}/...`); same rules as `peers[].name`."""
+    url: str | None = None
+    """Its own vigil's base URL, `http(s)://host[:port]`, for links only; the hub never requests
+    it."""
+
+
+@dataclass(frozen=True)
 class Config:
     claude_home: Path = field(default_factory=lambda: Path.home() / ".claude")
     port: int = 7787
@@ -132,6 +158,11 @@ class Config:
     machine: str | None = None
     """What the machine column calls this machine; None means its host name."""
     peers: tuple[Peer, ...] = ()
+    mode: Mode = "local"
+    hub_mode: HubModeConfig = field(default_factory=HubModeConfig)
+    """Only set (`[hub_mode]`) with `mode = "hub"`."""
+    machines: tuple[HubMachine, ...] = ()
+    """Only set (`[[machines]]`) with `mode = "hub"`."""
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -522,6 +553,73 @@ def _parse_machine(raw: dict[str, Any]) -> str | None:
     return value.strip()
 
 
+def _parse_mode(raw: dict[str, Any]) -> Mode:
+    value = raw.get("mode", "local")
+    if value not in get_args(Mode):
+        raise ConfigError(f"`mode` must be one of {', '.join(get_args(Mode))}")
+    return cast(Mode, value)
+
+
+def _public_url(value: Any) -> str:
+    problem = (
+        "`hub_mode.public_url` must be https://host[:port] with no path, user name, query or "
+        "fragment"
+    )
+    try:
+        url = _peer_url(value, "hub_mode.public_url")
+    except ConfigError:
+        raise ConfigError(f"{problem}: {value!r}") from None
+    if not url.startswith("https://"):
+        raise ConfigError(f"{problem}: {value!r}")
+    return url
+
+
+def _parse_hub_mode(raw: dict[str, Any]) -> HubModeConfig:
+    table = _table(raw, "hub_mode")
+    _check_keys(table, {"public_url", "stale_after"}, "hub_mode")
+    defaults = HubModeConfig()
+    public_url = defaults.public_url
+    if "public_url" in table:
+        public_url = _public_url(table["public_url"])
+    stale_after = defaults.stale_after
+    if "stale_after" in table:
+        value = table["stale_after"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 30 <= value <= 3600:
+            raise ConfigError("`hub_mode.stale_after` must be an integer from 30 to 3600")
+        stale_after = value
+    return HubModeConfig(public_url=public_url, stale_after=stale_after)
+
+
+def _parse_machines(raw: dict[str, Any]) -> tuple[HubMachine, ...]:
+    value = raw.get("machines", [])
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ConfigError("`machines` must be an array of tables ([[machines]])")
+    machines: list[HubMachine] = []
+    for number, table in enumerate(cast(list[dict[str, Any]], value), start=1):
+        where = f"machines[{number}]"
+        _check_keys(table, {"name", "url"}, where)
+        if "name" not in table:
+            raise ConfigError(f"`{where}.name` is missing")
+        name = check_machine_name(table["name"], f"{where}.name")
+        if any(machine.name == name for machine in machines):
+            raise ConfigError(f"`{where}.name`: two machines are called {name!r}")
+        url = _peer_url(table["url"], where) if "url" in table else None
+        machines.append(HubMachine(name=name, url=url))
+    return tuple(machines)
+
+
+def _check_mode(raw: dict[str, Any], mode: Mode) -> None:
+    """Refuse settings that do not go with `mode`: peers on a hub; `[hub_mode]` and
+    `[[machines]]` anywhere else."""
+    if mode == "hub":
+        if raw.get("peers"):
+            raise ConfigError('`peers` cannot be used with `mode = "hub"`')
+        return
+    for key, name in (("hub_mode", "[hub_mode]"), ("machines", "[[machines]]")):
+        if key in raw:
+            raise ConfigError(f'`{key}` ({name}) needs `mode = "hub"`')
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load the config file; a missing file gives the defaults.
 
@@ -530,8 +628,9 @@ def load_config(path: Path | None = None) -> Config:
     that is not an address, path or host name, a `[[server.tokens]]` entry without a valid file,
     scope and (for `push` only) machine, a `[server.access]` without a `<team>.cloudflareaccess.com`
     team domain and audience tags (or with a service token like a bad `[[server.tokens]]` entry,
-    or a client ID listed twice), or a `peers` entry without a valid name, URL and token file
-    path.
+    or a client ID listed twice), a `peers` entry without a valid name, URL and token file path,
+    a `mode` other than `local` or `hub`, `peers` with `mode = "hub"`, `[hub_mode]` or
+    `[[machines]]` without it, or a `[[machines]]` entry without a valid, unique name.
     """
     path = path if path is not None else config_path()
     try:
@@ -544,9 +643,23 @@ def load_config(path: Path | None = None) -> Config:
 
     _check_keys(
         raw,
-        {"claude_home", "port", "resume", "usage", "server", "review", "machine", "peers"},
+        {
+            "claude_home",
+            "port",
+            "resume",
+            "usage",
+            "server",
+            "review",
+            "machine",
+            "peers",
+            "mode",
+            "hub_mode",
+            "machines",
+        },
         "",
     )
+    mode = _parse_mode(raw)
+    _check_mode(raw, mode)
     defaults = Config()
     claude_home = defaults.claude_home
     if "claude_home" in raw:
@@ -568,4 +681,7 @@ def load_config(path: Path | None = None) -> Config:
         review=_parse_review(raw),
         machine=machine,
         peers=_parse_peers(raw, machine),
+        mode=mode,
+        hub_mode=_parse_hub_mode(raw),
+        machines=_parse_machines(raw),
     )

@@ -355,3 +355,78 @@ def test_access_turns_remote_on(tmp_path: Path) -> None:
     server = load_config(path).server
     assert server.allowed_hosts == ("hub.example.com",)
     assert server.access == access
+
+
+# Hub mode (imported here so the imports above stay as other branches left them).
+from vigil.config import HubMachine, HubModeConfig  # noqa: E402
+
+
+def test_hub_mode_config_parsed(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        'mode = "hub"\n\n'
+        '[hub_mode]\npublic_url = "https://hub.example.com"\nstale_after = 300\n\n'
+        '[[machines]]\nname = "laptop"\nurl = "http://laptop.example-tailnet.ts.net:7787"\n\n'
+        '[[machines]]\nname = "desk"\n',
+    )
+    config = load_config(path)
+    assert config.mode == "hub"
+    assert config.hub_mode == HubModeConfig(public_url="https://hub.example.com", stale_after=300)
+    assert config.machines == (
+        HubMachine(name="laptop", url="http://laptop.example-tailnet.ts.net:7787"),
+        HubMachine(name="desk"),
+    )
+    defaults = load_config(write(tmp_path, ""))
+    assert defaults.mode == "local"
+    assert defaults.hub_mode == HubModeConfig(public_url=None, stale_after=180)
+    assert defaults.machines == ()
+    assert load_config(write(tmp_path, 'mode = "local"\n')).mode == "local"
+
+
+_HUB = 'mode = "hub"\n'
+
+
+@pytest.mark.parametrize(
+    ("text", "where"),
+    [
+        ('mode = "server"\n', "`mode`"),
+        (_HUB + '[hub_mode]\npublic_url = "http://hub.example.com"\n', "hub_mode.public_url"),
+        (_HUB + '[hub_mode]\npublic_url = "https://hub.example.com/x"\n', "hub_mode.public_url"),
+        (_HUB + "[hub_mode]\nstale_after = 29\n", "hub_mode.stale_after"),
+        (_HUB + "[hub_mode]\nstale_after = 3601\n", "hub_mode.stale_after"),
+        (
+            _HUB + '[[machines]]\nname = "laptop"\n\n[[machines]]\nname = "laptop"\n',
+            "machines[2].name",
+        ),
+        (
+            _HUB + '[[peers]]\nname = "desk"\nurl = "http://desk.example.com:7787"\n'
+            'token_file = "/tmp/t"\n',
+            "peers",
+        ),
+        ('[[machines]]\nname = "laptop"\n', "machines"),
+    ],
+)
+def test_hub_mode_refused(tmp_path: Path, text: str, where: str) -> None:
+    with pytest.raises(ConfigError, match=re.escape(where)):
+        load_config(write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("text", "where"),
+    [
+        ("mode = 1\n", "`mode`"),
+        ('[hub_mode]\npublic_url = "https://hub.example.com"\n', "hub_mode"),
+        (_HUB + "[hub_mode]\nstale_after = true\n", "hub_mode.stale_after"),
+        (_HUB + "[hub_mode]\nstale_after = 60.5\n", "hub_mode.stale_after"),
+        (_HUB + "[hub_mode]\nother = 1\n", "hub_mode.other"),
+        (_HUB + 'hub_mode = "x"\n', "hub_mode"),
+        (_HUB + 'machines = ["laptop"]\n', "machines"),
+        (_HUB + '[[machines]]\nurl = "http://laptop.example.com"\n', "machines[1].name"),
+        (_HUB + '[[machines]]\nname = "bad name"\n', "machines[1].name"),
+        (_HUB + '[[machines]]\nname = "laptop"\nurl = "ftp://laptop"\n', "machines[1].url"),
+        (_HUB + '[[machines]]\nname = "laptop"\ntoken = "x"\n', "machines[1].token"),
+    ],
+)
+def test_hub_mode_refused_more(tmp_path: Path, text: str, where: str) -> None:
+    with pytest.raises(ConfigError, match=re.escape(where)):
+        load_config(write(tmp_path, text))
