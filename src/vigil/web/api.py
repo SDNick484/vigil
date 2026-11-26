@@ -50,10 +50,10 @@ from vigil.resume import (
 )
 from vigil.serialize import apply_status, session_to_dict
 from vigil.usage import build_report, catalog_entry_to_dict, refresh_sources, report_to_dict
-from vigil.web import WebState, connection, state
+from vigil.web import WebState, connection, local_only, state
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
-actions = APIRouter(tags=["actions"])
+actions = APIRouter(tags=["actions"], dependencies=[Depends(local_only)])
 
 _ALL_ROWS = -1
 """SQLite reads a negative LIMIT as "no limit"; used when rows are filtered after the query."""
@@ -264,7 +264,7 @@ def projects(request: Request) -> list[dict[str, object]]:
     ]
 
 
-@router.get("/usage", response_model=UsageOut)
+@router.get("/usage", response_model=UsageOut, dependencies=[Depends(local_only)])
 def usage(
     request: Request,
     project: Annotated[str | None, Query(description="a project key (limits `features`)")] = None,
@@ -282,7 +282,7 @@ def usage(
     return report_to_dict(report)
 
 
-@router.get("/catalog", response_model=list[CatalogEntryOut])
+@router.get("/catalog", response_model=list[CatalogEntryOut], dependencies=[Depends(local_only)])
 def catalog(request: Request) -> list[dict[str, object]]:
     """The flags and subcommands the installed `claude` lists, from its own `--help` (the latest
     version seen); empty when no `claude` has been found."""
@@ -313,8 +313,17 @@ def peers(request: Request) -> list[dict[str, object]]:
 
 @router.get("/health", response_model=HealthOut)
 def health(request: Request) -> dict[str, object]:
-    """Whether the service is up, what it runs, and how much it has indexed."""
+    """Whether the service is up, what it runs, and how much it has indexed. A hub has no index
+    and runs no `claude`."""
     web = state(request)
+    if web.config.mode == "hub":
+        return {
+            "status": "ok",
+            "version": vigil.__version__,
+            "claude_version": None,
+            "indexed_sessions": 0,
+            "last_scan_at": None,
+        }
     with connection(request) as conn:
         count = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
     caps, _ = web.live.get()

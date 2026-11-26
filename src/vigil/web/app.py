@@ -31,6 +31,11 @@ ROUTERS: list[APIRouter] = [
 ]
 
 
+def _no_index() -> sqlite3.Connection:
+    """A hub's index connection factory: a hub has no index."""
+    raise RuntimeError("hub mode has no index")
+
+
 def create_app(
     config: Config,
     *,
@@ -51,9 +56,14 @@ def create_app(
     `peer_transport` replaces the network for those requests (tests). On startup, reviews left
     `running` by an earlier run of the service are marked failed (`vigil.review.store`); on
     shutdown, a review in progress has its `claude` stopped and is marked failed.
+
+    In hub mode (`config.mode == "hub"`) there is no index (`conn_factory` defaults to one that
+    raises RuntimeError), no watcher and no review, and nothing runs `claude`; `start_watcher`
+    is ignored.
     """
     remote = auth.load_auth(config.server, data_dir(), access_transport=access_transport)
-    factory = conn_factory or functools.partial(connect, index_path())
+    is_hub = config.mode == "hub"
+    factory = conn_factory or (_no_index if is_hub else functools.partial(connect, index_path()))
     hub = PeerHub(config.peers, cache_dir=data_dir() / CACHE_DIR, transport=peer_transport)
     web = WebState(config=config, conn_factory=factory, peers=hub)
 
@@ -62,6 +72,9 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if is_hub:
+            yield
+            return
         # A review still marked running was cut off when the service last stopped.
         conn = factory()
         try:

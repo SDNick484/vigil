@@ -297,3 +297,92 @@ class CertsServer(httpx.MockTransport):
         if self.redirect is not None:
             return httpx.Response(302, headers={"Location": self.redirect})
         return httpx.Response(200, json={"keys": self.jwks})
+
+
+# Hub mode (vigil hub, Task 9).
+from fastapi import FastAPI  # noqa: E402
+
+FULL = "hub-full-token-placeholder-" + "0" * 16
+"""The hub's `server.token_file` token (scope `full`). Every hub token is a placeholder."""
+READ = "hub-read-token-placeholder-" + "1" * 16
+PUSH_LAPTOP = "hub-push-laptop-placeholder-" + "2" * 16
+PUSH_DESK = "hub-push-desk-placeholder-" + "3" * 16
+PUSH_GHOST = "hub-push-ghost-placeholder-" + "4" * 16
+"""A `push` token for `ghost`, a machine the hub's `[[machines]]` does not list."""
+HUB_HOST = "hub.example.com"
+
+
+@dataclass(frozen=True)
+class HubEnv:
+    """A hub's world, all under tmp: its config file, its data folder and fakes on PATH."""
+
+    config_path: Path
+    data_dir: Path
+    bin: FakeBin
+
+
+def _hub_token(directory: Path, name: str, token: str) -> Path:
+    path = directory / name
+    path.write_text(token + "\n")
+    path.chmod(0o600)
+    return path
+
+
+@pytest.fixture
+def hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: FakeBin) -> HubEnv:
+    """A vigil in hub mode: machines `laptop` (with a URL) and `desk`, a full `token_file`, a
+    read token and push tokens for `laptop`, `desk` and the unlisted `ghost`, `HUB_HOST`
+    allowed. Its `claude_home` does not exist, and a fake `claude` is installed so a test can
+    assert it was never run."""
+    config_home = tmp_path / "xdg_config"
+    data_home = tmp_path / "xdg_data"
+    tokens = tmp_path / "tokens"
+    (config_home / "vigil").mkdir(parents=True)
+    tokens.mkdir()
+    entries: list[tuple[str, str, str, str | None]] = [
+        ("read", READ, "read", None),
+        ("laptop", PUSH_LAPTOP, "push", "laptop"),
+        ("desk", PUSH_DESK, "push", "desk"),
+        ("ghost", PUSH_GHOST, "push", "ghost"),
+    ]
+    server = [
+        "[server]",
+        f'allowed_hosts = ["{HUB_HOST}"]',
+        f'token_file = "{_hub_token(tokens, "full", FULL)}"',
+    ]
+    for name, token, scope, machine in entries:
+        server += ["", "[[server.tokens]]", f'file = "{_hub_token(tokens, name, token)}"']
+        server += [f'scope = "{scope}"'] + ([f'machine = "{machine}"'] if machine else [])
+    config = config_home / "vigil" / "config.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'mode = "hub"',
+                f'claude_home = "{tmp_path / "no-claude-home"}"',
+                "",
+                "[hub_mode]",
+                f'public_url = "https://{HUB_HOST}"',
+                "",
+                *server,
+                "",
+                "[[machines]]",
+                'name = "laptop"',
+                'url = "http://laptop.example.com:7787"',
+                "",
+                "[[machines]]",
+                'name = "desk"',
+                "",
+            ]
+        )
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    fake_bin.install("claude", stdout="2.1.312 (Claude Code)\n")
+    return HubEnv(config, data_home / "vigil", fake_bin)
+
+
+@pytest.fixture
+def hub_app(hub_env: HubEnv) -> FastAPI:
+    """The service in hub mode (`hub_env`), as `vigil serve` builds it: no index, no watcher."""
+    return create_app(load_config(hub_env.config_path))

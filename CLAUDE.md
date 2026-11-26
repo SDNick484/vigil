@@ -32,6 +32,7 @@ CI runs exactly this; run it before every commit:
 - Every PR updates `CHANGELOG.md` under `[Unreleased]` (one line per change).
 - Session reviews run only `claude -p --resume <id> --fork-session --no-session-persistence --tools "" --strict-mcp-config --output-format json --json-schema <schema> --max-budget-usd <budget> [--model <model>] <prompt>` (`vigil.review.runner.review_argv`), in the session's folder, against a session ID present in the index; the fork is never persisted and has no tools, and no MCP server loads (not even a project's `.mcp.json`). The review command line is exactly the one in the spec plus `--model`; changing its flags needs the author's approval. Review suggestions are untrusted: every text field is cut to 500 characters, and they act only through the allow-lists.
 - Peers forward Resume, Restart with Remote Control, Review and every suggestion action, and apply the same checks as for a local request.
+- Hub mode (`mode = "hub"`) must start and serve without `claude` or a Claude home, and never runs `claude`.
 
 ## Append points
 

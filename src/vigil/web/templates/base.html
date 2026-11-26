@@ -13,7 +13,7 @@
     <a class="brand" href="/">vigil</a>
     <nav>
       <a href="/">Sessions</a>
-      <a href="/usage">Usage</a>
+      {% if request.app.state.vigil.config.mode != "hub" %}<a href="/usage">Usage</a>{% endif %}
       {# Add a nav link by appending one line here. #}
       {% if request.scope.get("vigil.access") == "cookie" %}<form method="post" action="/logout"><button type="submit">Log out</button></form>{% endif %}
     </nav>
