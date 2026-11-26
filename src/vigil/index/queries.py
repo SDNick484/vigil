@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal
 
-from vigil.index.db import from_db, to_db
+from vigil.index.db import from_db, to_db, urls_from_db
 
 Status = Literal["running", "background", "idle", "unknown"]
 
@@ -47,6 +47,8 @@ class SessionRow:
     status: Status = "unknown"
     remote_url: str | None = None
     remote_url_at: datetime | None = None
+    remote_urls: tuple[str, ...] = ()
+    """Every Remote Control link the transcript recorded, oldest first (at most 50)."""
     open_url: str | None = None
     """The link to join the session by right now (`vigil.serialize.open_link`), set along with
     `status` by `apply_status`; None when it is not live or has no current link."""
@@ -106,6 +108,7 @@ def _row(row: sqlite3.Row) -> SessionRow:
         models=tuple(sorted(models.split(_SEP))) if models else (),
         remote_url=row["remote_url"],
         remote_url_at=from_db(row["remote_url_at"]),
+        remote_urls=tuple(urls_from_db(row["remote_urls"])),
     )
 
 

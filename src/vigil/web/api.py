@@ -89,6 +89,7 @@ class SessionOut(BaseModel):
     status: Status
     remote_url: str | None
     remote_url_at: str | None
+    remote_urls: list[str]
     open_url: str | None
     busy: bool
 

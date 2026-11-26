@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from vigil.transcript import TRUNCATE, FeatureKind, find_remote_url, parse_transcript
+from vigil.transcript import (
+    MAX_REMOTE_URLS,
+    TRUNCATE,
+    FeatureKind,
+    find_remote_url,
+    parse_transcript,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "transcripts"
 REAL = FIXTURES / "2.1.312"
@@ -292,3 +298,53 @@ def test_find_remote_url_after() -> None:
     assert find_remote_url(REMOTE, between) == "https://claude.ai/code/session_PLACEHOLDER02"
     assert find_remote_url(REMOTE, datetime(2026, 11, 17, 11, 5, tzinfo=UTC)) is None
     assert find_remote_url(REMOTE, datetime(2026, 11, 18, tzinfo=UTC)) is None
+
+
+def bridge_line(url: str, at: str) -> str:
+    record = {"type": "system", "subtype": "bridge_status", "url": url, "timestamp": at}
+    return json.dumps(record) + "\n"
+
+
+def test_remote_urls_oldest_first_deduplicated(tmp_path: Path) -> None:
+    path = tmp_path / REMOTE.name
+    path.write_text(
+        REMOTE.read_text()
+        + bridge_line("https://claude.ai/code/session_PLACEHOLDER01", "2026-11-17T11:10:00.000Z")
+    )
+    facts = parse_transcript(path).facts
+    assert facts.remote_urls == [
+        "https://claude.ai/code/session_PLACEHOLDER02",
+        "https://claude.ai/code/session_PLACEHOLDER01",
+    ]
+    assert "https://evil.example/x" not in facts.remote_urls
+
+
+def test_remote_urls_capped_at_50(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.jsonl"
+    path.write_text(
+        "".join(
+            bridge_line(
+                f"https://claude.ai/code/link_{n:02d}",
+                f"2026-11-17T{n // 60 + 11}:{n % 60:02d}:00Z",
+            )
+            for n in range(1, 61)
+        )
+    )
+    urls = parse_transcript(path).facts.remote_urls
+    assert len(urls) == MAX_REMOTE_URLS == 50
+    assert urls[0] == "https://claude.ai/code/link_11"
+    assert urls[-1] == "https://claude.ai/code/link_60"
+
+
+def test_remote_urls_incremental_matches_whole(tmp_path: Path) -> None:
+    lines = REMOTE.read_text().splitlines(keepends=True)
+    lines.append(
+        bridge_line("https://claude.ai/code/session_PLACEHOLDER01", "2026-11-17T11:10:00Z")
+    )
+    path = tmp_path / REMOTE.name
+    path.write_text("".join(lines[:3]))
+    first = parse_transcript(path)
+    path.write_text("".join(lines))
+    second = parse_transcript(path, first.end_offset, first.facts)
+    assert second.facts.remote_urls == parse_transcript(path).facts.remote_urls
+    assert len(second.facts.remote_urls) == 2

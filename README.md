@@ -361,6 +361,7 @@ Each session has the same fields as `vigil ls --json` (and `vigil show --json` f
 | `project_key`, `project_label` | The project: git remote URL, else the folder. |
 | `transcript_path` | The transcript file. |
 | `remote_url`, `remote_url_at` | The session's Claude Remote Control link (null if none) and when it was written. |
+| `remote_urls` | Every Remote Control link the transcript recorded for the session, oldest first, at most 50 (a link seen again moves to the end; empty if none). |
 | `open_url` | The link to join the session by right now: `remote_url` when the session is live and the link is from its current run; else null (also when live sessions are not known). |
 | `busy` | `true` when the session is live and working on something right now. |
 | `status` | `running` (open in a terminal), `background`, `idle`, or `unknown` when the installed `claude` cannot list live sessions. Refreshed at most every 5 seconds. |

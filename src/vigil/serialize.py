@@ -27,6 +27,7 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
     - `started_at` and `last_activity_at` are ISO 8601 strings in UTC (or null).
     - `remote_url` is the session's Claude Remote Control link (or null) and `remote_url_at` when
       it was written, an ISO 8601 string in UTC.
+    - `remote_urls` is every Remote Control link the session had, oldest first (at most 50).
     - `open_url` is the link to join the session by right now (`open_link`: it is live and the
       link is from its current run), else null; null too where the live sessions are not known.
     - `busy` is true when the session is live and working on something now, else false.
@@ -60,6 +61,7 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
         "status": row.status,
         "remote_url": row.remote_url,
         "remote_url_at": to_db(row.remote_url_at),
+        "remote_urls": list(row.remote_urls),
         "open_url": row.open_url,
         "busy": row.busy,
     }

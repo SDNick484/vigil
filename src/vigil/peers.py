@@ -51,7 +51,7 @@ from vigil.review.numbers import TOP_TOOL_OUTPUTS, SessionNumbers, ToolOutput, T
 from vigil.review.schema import MAX_SUGGESTIONS, MAX_TITLE, Suggestion, clean, parse_output
 from vigil.review.store import Review, ReviewStatus
 from vigil.serialize import session_to_dict
-from vigil.transcript import REMOTE_URL
+from vigil.transcript import MAX_REMOTE_URLS, REMOTE_URL
 
 PEER_TIMEOUT = 3.0
 """Seconds a sessions fetch may spend connecting, and waiting for each read; the whole answer
@@ -254,6 +254,12 @@ def session_from_dict(
     open_url = data.get("open_url")
     if not isinstance(open_url, str) or not REMOTE_URL.fullmatch(open_url):
         open_url = None
+    urls = data.get("remote_urls")
+    remote_urls = (
+        tuple(u for u in urls if isinstance(u, str) and REMOTE_URL.fullmatch(u))[:MAX_REMOTE_URLS]
+        if isinstance(urls, list)
+        else ()
+    )
     snippets = {key: _text(data, key, TEXT_LIMIT) for key in _SNIPPETS}
     return PeerSession(
         session_id=session_id,
@@ -283,6 +289,7 @@ def session_from_dict(
         status=cast(Status, status) if status in _STATUSES and not stale else "unknown",
         remote_url=remote_url,
         remote_url_at=_time(data, "remote_url_at") if remote_url else None,
+        remote_urls=remote_urls,
         open_url=open_url,
         busy=data.get("busy") is True and not stale,
         peer=peer,
