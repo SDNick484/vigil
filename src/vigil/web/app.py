@@ -12,6 +12,7 @@ from fastapi import APIRouter, FastAPI
 
 import vigil
 from vigil.config import Config
+from vigil.hub import HUB_DIR, HubStore
 from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
 from vigil.paths import data_dir, index_path
@@ -59,21 +60,29 @@ def create_app(
 
     In hub mode (`config.mode == "hub"`) there is no index (`conn_factory` defaults to one that
     raises RuntimeError), no watcher and no review, and nothing runs `claude`; `start_watcher`
-    is ignored.
+    is ignored. The machines' snapshots (`vigil.hub.HubStore`, in the data dir's `hub/`) are
+    read on startup, and when each was last seen is written on shutdown.
     """
     remote = auth.load_auth(config.server, data_dir(), access_transport=access_transport)
     is_hub = config.mode == "hub"
     factory = conn_factory or (_no_index if is_hub else functools.partial(connect, index_path()))
     hub = PeerHub(config.peers, cache_dir=data_dir() / CACHE_DIR, transport=peer_transport)
     web = WebState(config=config, conn_factory=factory, peers=hub)
+    if is_hub:
+        web.hub = HubStore(data_dir() / HUB_DIR, config.machines, config.hub_mode.stale_after)
 
     def scanned(stats: ScanStats) -> None:
         web.last_scan_at = datetime.now(UTC)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if is_hub:
-            yield
+        if web.hub is not None:
+            store = web.hub
+            await asyncio.to_thread(store.load)
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(store.flush, force=True)
             return
         # A review still marked running was cut off when the service last stopped.
         conn = factory()

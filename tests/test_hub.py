@@ -182,3 +182,208 @@ def test_hub_fields_ignored() -> None:
     for key in ("stale", "resume_url", "received_at", "machine_url"):
         assert key not in parsed
     assert parsed["machine"] == "laptop"
+
+
+# HubStore (Task 11).
+import logging  # noqa: E402
+import os  # noqa: E402
+import stat  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from vigil.config import HubMachine  # noqa: E402
+from vigil.hub import HubStore, Snapshot  # noqa: E402
+
+MACHINES = (HubMachine("laptop", "http://laptop.example.com:7787"), HubMachine("desk"))
+START = datetime(2026, 11, 25, 18, 0, tzinfo=UTC)
+
+
+class Clock:
+    """A wall clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = START
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+def make_store(directory: Path, clock: Clock, stale_after: int = 180) -> HubStore:
+    return HubStore(directory, MACHINES, stale_after, clock=clock)
+
+
+def parsed(machine: str = "laptop", *ids: str) -> Snapshot:
+    sessions = [placeholder_session(session_id) for session_id in ids or (SESSION_ID,)]
+    return parse_snapshot(encode(snapshot(sessions, machine=machine)), machine)
+
+
+def stored(directory: Path, name: str = "laptop") -> dict[str, Any]:
+    data: dict[str, Any] = json.loads((directory / f"{name}.json").read_text())
+    return data
+
+
+def test_replace_and_reload(tmp_path: Path) -> None:
+    directory = tmp_path / "data" / "hub"
+    clock = Clock()
+    store = make_store(directory, clock)
+    snap = parsed("laptop", "a1", "b2")
+    received = store.replace(snap)
+    assert received == START
+    [row_a, row_b] = store.sessions()
+    assert (row_a.session_id, row_b.session_id) == ("a1", "b2")
+    assert row_a.received_at == START and row_a.machine == "laptop"
+    assert stat.S_IMODE((directory / "laptop.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    content = stored(directory)
+    assert set(content) == {
+        "format",
+        "machine",
+        "digest",
+        "received_at",
+        "last_seen_at",
+        "generated_at",
+        "live_checked_at",
+        "vigil_version",
+        "sessions",
+    }
+    assert content["digest"] == snap.digest
+    assert content["sessions"] == snap.sessions
+
+    clock.advance(30)
+    again = make_store(directory, clock)
+    again.load()
+    assert again.sessions() == store.sessions()
+    assert again.heartbeat("laptop", snap.digest)
+    [laptop, desk] = again.machines()
+    assert laptop.last_snapshot_at == START
+    assert laptop.session_count == 2
+    assert laptop.url == "http://laptop.example.com:7787"
+    assert desk.session_count == 0 and desk.last_snapshot_at is None
+
+
+def test_failed_write_keeps_old_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = tmp_path / "hub"
+    store = make_store(directory, Clock())
+    first = parsed("laptop", "a1")
+    store.replace(first)
+    before = (directory / "laptop.json").read_bytes()
+
+    def refuse(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        store.replace(parsed("laptop", "b2"))
+    assert [row.session_id for row in store.sessions()] == ["a1"]
+    assert store.heartbeat("laptop", first.digest)
+    assert (directory / "laptop.json").read_bytes() == before
+    assert sorted(path.name for path in directory.iterdir()) == ["laptop.json"]
+
+
+def test_leftover_temp_file_ignored(tmp_path: Path) -> None:
+    directory = tmp_path / "hub"
+    make_store(directory, Clock()).replace(parsed("laptop", "a1"))
+    (directory / ".laptop.json.deadbeef").write_bytes(b'{"format": 1, "sessio')
+    store = make_store(directory, Clock())
+    store.load()
+    assert [row.session_id for row in store.sessions()] == ["a1"]
+
+
+def test_corrupt_file_is_no_snapshot(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    directory = tmp_path / "hub"
+    directory.mkdir(mode=0o700)
+    (directory / "laptop.json").write_text("{")
+    store = make_store(directory, Clock())
+    with caplog.at_level(logging.WARNING, logger="vigil.hub"):
+        store.load()
+    assert "laptop.json" in caplog.text
+    assert store.machines()[0].session_count == 0
+    assert store.sessions() == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"machine": "desk"},
+        {"format": 2},
+        {"digest": 3},
+        {"received_at": "never"},
+        {"sessions": [{"id": "x"}]},
+    ],
+)
+def test_tampered_file_is_no_snapshot(tmp_path: Path, change: dict[str, Any]) -> None:
+    directory = tmp_path / "hub"
+    make_store(directory, Clock()).replace(parsed("laptop", "a1"))
+    path = directory / "laptop.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **change}))
+    store = make_store(directory, Clock())
+    store.load()
+    assert store.sessions() == []
+
+
+def test_unlisted_file_ignored(tmp_path: Path) -> None:
+    directory = tmp_path / "hub"
+    HubStore(directory, (HubMachine("intruder"),), 180).replace(parsed("intruder", "a1"))
+    assert (directory / "intruder.json").exists()
+    store = make_store(directory, Clock())
+    store.load()
+    assert store.sessions() == []
+    assert not store.knows("intruder")
+    assert store.knows("laptop") and store.knows("desk")
+
+
+def test_heartbeat_digest(tmp_path: Path) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "hub", clock)
+    snap = parsed("laptop", "a1")
+    assert not store.heartbeat("laptop", snap.digest)
+    store.replace(snap)
+    clock.advance(20)
+    assert store.heartbeat("laptop", snap.digest)
+    assert store.machines()[0].last_seen_at == START + timedelta(seconds=20)
+    assert store.machines()[0].last_snapshot_at == START
+    clock.advance(20)
+    assert not store.heartbeat("laptop", "0" * 64)
+    assert store.machines()[0].last_seen_at == START + timedelta(seconds=20)
+    assert not store.heartbeat("desk", snap.digest)
+    assert not store.heartbeat("ghost", snap.digest)
+
+
+def test_last_seen_flushed_once_a_minute(tmp_path: Path) -> None:
+    directory = tmp_path / "hub"
+    clock = Clock()
+    store = make_store(directory, clock)
+    snap = parsed("laptop", "a1")
+    store.replace(snap)
+    written = stored(directory)["last_seen_at"]
+    for seconds in (10, 20):  # +10 s, +30 s
+        clock.advance(seconds)
+        assert store.heartbeat("laptop", snap.digest)
+        assert stored(directory)["last_seen_at"] == written
+    clock.advance(31)  # +61 s
+    assert store.heartbeat("laptop", snap.digest)
+    assert stored(directory)["last_seen_at"] == (START + timedelta(seconds=61)).isoformat(
+        timespec="microseconds"
+    )
+    clock.advance(5)
+    store.heartbeat("laptop", snap.digest)
+    store.flush()
+    assert stored(directory)["last_seen_at"].startswith("2026-11-25T18:01:01")
+    store.flush(force=True)
+    assert stored(directory)["last_seen_at"].startswith("2026-11-25T18:01:06")
+    assert stored(directory)["sessions"] == snap.sessions
+
+
+def test_stale_after(tmp_path: Path) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "hub", clock, stale_after=180)
+    store.replace(parsed("laptop", "a1"))
+    clock.advance(179)
+    laptop, desk = store.machines()
+    assert not laptop.stale
+    assert desk.stale and desk.last_seen_at is None
+    clock.advance(2)
+    assert store.machines()[0].stale

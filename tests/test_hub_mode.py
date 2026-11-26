@@ -6,6 +6,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.conftest import FULL, HUB_HOST, LOOPBACK_URL, HubEnv
+from tests.test_hub import encode, placeholder_session, snapshot
+from vigil.config import load_config
+from vigil.hub import HUB_DIR, HubStore, parse_snapshot
+from vigil.web import WebState
 
 LOCAL_PEER = ("127.0.0.1", 50000)
 REMOTE_PEER = ("192.0.2.10", 50000)  # TEST-NET-1: never a real client
@@ -70,3 +74,18 @@ def test_hub_pages_have_no_usage_link(hub_app: FastAPI) -> None:
 
 def test_local_pages_keep_usage_link(web_client: TestClient) -> None:
     assert 'href="/usage"' in web_client.get("/").text
+
+
+def test_hub_store_read_on_startup(hub_env: HubEnv, hub_app: FastAPI) -> None:
+    config = load_config(hub_env.config_path)
+    earlier = HubStore(hub_env.data_dir / HUB_DIR, config.machines, 180)
+    earlier.replace(parse_snapshot(encode(snapshot([placeholder_session()])), "laptop"))
+    web: WebState = hub_app.state.vigil
+    assert web.hub is not None
+    assert web.hub.sessions() == []
+    with local(hub_app):
+        assert [row.session_id for row in web.hub.sessions()] == [placeholder_session()["id"]]
+
+
+def test_local_vigil_has_no_hub_store(web_client: TestClient) -> None:
+    assert web_client.app.state.vigil.hub is None  # type: ignore[attr-defined]

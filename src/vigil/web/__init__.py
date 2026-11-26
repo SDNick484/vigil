@@ -28,6 +28,7 @@ from vigil.claude_cli import (
     live_sessions_or_none,
 )
 from vigil.config import Config, load_config
+from vigil.hub import HubStore
 from vigil.peers import PeerHub
 from vigil.review.runner import ReviewSlot
 
@@ -87,6 +88,8 @@ class WebState:
     """The configured peers (v2) and their latest sessions."""
     review_slot: ReviewSlot = field(default_factory=ReviewSlot)
     """Taken while a session review runs: one at a time (`vigil.web.review`)."""
+    hub: HubStore | None = None
+    """The machines' snapshots; set only in hub mode (`mode = "hub"`)."""
 
     def reload_config(self) -> None:
         """Re-read the config file (`vigil.paths.config_path`, where `vigil serve` reads it) after

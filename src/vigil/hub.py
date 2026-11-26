@@ -7,14 +7,27 @@ a known field with the wrong type, a time that is not ISO 8601 or a session with
 (`stale`, `received_at`, `resume_url`, `machine_url`); `machine` is the name pushed for; every
 string is cut to `TEXT_LIMIT` characters. The digest is taken over the `sessions` array as
 received (before any of that), so it matches the one the machine computes for its heartbeat.
+
+`HubStore` keeps each configured machine's latest snapshot in memory and in
+`<data dir>/hub/<name>.json` (0600, in a 0700 folder), replaced in one step (a temporary file,
+`fsync`, rename). `last_seen_at`, which heartbeats move, is written at most once a minute.
 """
 
 import json
-from dataclasses import dataclass
-from datetime import UTC, datetime
+import logging
+import os
+import re
+import secrets
+import threading
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, cast, get_args
 
+from vigil.config import HubMachine
+from vigil.index.db import to_db
 from vigil.index.queries import SessionRow, Status
 from vigil.peers import _SESSION_ID
 from vigil.transcript import MAX_REMOTE_URLS, REMOTE_URL
@@ -72,6 +85,9 @@ class Snapshot:
 @dataclass(frozen=True)
 class HubSession(SessionRow):
     """A session a machine pushed to this hub; `machine` is the name it pushed as."""
+
+    received_at: datetime | None = None
+    """When the hub accepted the snapshot this session came from."""
 
 
 def canonical_digest(sessions: list[Any]) -> str:
@@ -252,3 +268,276 @@ def session_from_snapshot(data: dict[str, Any], machine: str) -> HubSession:
         open_url=data.get("open_url"),
         busy=data.get("busy", False),
     )
+
+
+LAST_SEEN_FLUSH = 60.0
+"""Seconds between writes of a machine's `last_seen_at` that only heartbeats moved."""
+
+_log = logging.getLogger(__name__)
+
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+_MAX_FILE_BYTES = 2 * MAX_SNAPSHOT_BYTES
+"""Most a stored file is read of: its sessions were cut, so it is never larger than this."""
+
+
+@dataclass(frozen=True)
+class MachineState:
+    """A configured machine as the hub knows it: `stale` when it was never seen or not within
+    `hub_mode.stale_after` seconds."""
+
+    name: str
+    url: str | None
+    last_snapshot_at: datetime | None
+    last_seen_at: datetime | None
+    live_checked_at: datetime | None
+    stale: bool
+    session_count: int
+
+
+@dataclass
+class _Stored:
+    """A machine's latest snapshot, as held in memory."""
+
+    snapshot: Snapshot
+    rows: list[HubSession]
+    received_at: datetime
+    last_seen_at: datetime
+    written_last_seen: datetime
+    """`last_seen_at` as the file holds it."""
+    written_at: datetime
+    """When the file was last written (or read)."""
+
+
+def _content(stored: _Stored) -> dict[str, Any]:
+    snapshot = stored.snapshot
+    return {
+        "format": SNAPSHOT_FORMAT,
+        "machine": snapshot.machine,
+        "digest": snapshot.digest,
+        "received_at": to_db(stored.received_at),
+        "last_seen_at": to_db(stored.last_seen_at),
+        "generated_at": to_db(snapshot.generated_at),
+        "live_checked_at": to_db(snapshot.live_checked_at),
+        "vigil_version": snapshot.vigil_version,
+        "sessions": snapshot.sessions,
+    }
+
+
+def _rows(snapshot: Snapshot, received_at: datetime) -> list[HubSession]:
+    return [
+        replace(session_from_snapshot(item, snapshot.machine), received_at=received_at)
+        for item in snapshot.sessions
+    ]
+
+
+def _from_file(data: Any, name: str) -> tuple[Snapshot, datetime, datetime]:
+    """A stored file's snapshot, `received_at` and `last_seen_at`, checked as strictly as a
+    push. Raises SnapshotError."""
+    if not isinstance(data, dict):
+        raise SnapshotError("not a JSON object")
+    content = cast(dict[str, Any], data)
+    if type(content.get("format")) is not int or content["format"] != SNAPSHOT_FORMAT:
+        raise SnapshotError(f"format: must be {SNAPSHOT_FORMAT}")
+    if content.get("machine") != name:
+        raise SnapshotError(f"machine: must be {name!r}")
+    digest = content.get("digest")
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+        raise SnapshotError("digest: must be 64 lowercase hex digits")
+    received_at = _time(content.get("received_at"), "received_at")
+    seen = content.get("last_seen_at")
+    last_seen_at = received_at if seen is None else _time(seen, "last_seen_at")
+    generated_at = _time(content.get("generated_at"), "generated_at")
+    checked = content.get("live_checked_at")
+    live_checked_at = None if checked is None else _time(checked, "live_checked_at")
+    vigil_version = content.get("vigil_version")
+    if not isinstance(vigil_version, str):
+        raise SnapshotError("vigil_version: must be a string")
+    sessions = content.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) > MAX_SNAPSHOT_SESSIONS:
+        raise SnapshotError(f"sessions: must be a list of at most {MAX_SNAPSHOT_SESSIONS}")
+    items: list[Any] = sessions
+    snapshot = Snapshot(
+        machine=name,
+        generated_at=generated_at,
+        vigil_version=_cut(vigil_version),
+        live_checked_at=live_checked_at,
+        sessions=[check_session(item, f"sessions[{n}]", name) for n, item in enumerate(items)],
+        digest=digest,
+    )
+    return snapshot, received_at, last_seen_at
+
+
+class HubStore:
+    """Each configured machine's latest snapshot (`[[machines]]`), in memory and in `directory`.
+    Safe to use from several threads."""
+
+    def __init__(
+        self,
+        directory: Path,
+        machines: Sequence[HubMachine],
+        stale_after: int,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self.directory = directory
+        self._machines = tuple(machines)
+        self._stale_after = timedelta(seconds=stale_after)
+        self._clock = clock
+        self._lock = threading.Lock()
+        """Guards `_stored`."""
+        self._writing = {machine.name: threading.Lock() for machine in self._machines}
+        """Held while a machine's file is written, and while what to write is decided."""
+        self._stored: dict[str, _Stored] = {}
+
+    def load(self) -> None:
+        """Read the stored snapshot of every configured machine (`<name>.json`; nothing else in
+        the folder is read). A file that cannot be read or checked is logged and left out: that
+        machine has no snapshot until it pushes again."""
+        for machine in self._machines:
+            path = self.directory / f"{machine.name}.json"
+            try:
+                with path.open("rb") as handle:
+                    raw = handle.read(_MAX_FILE_BYTES + 1)
+                if len(raw) > _MAX_FILE_BYTES:
+                    raise SnapshotError("file too large")
+                snapshot, received_at, last_seen_at = _from_file(json.loads(raw), machine.name)
+            except FileNotFoundError:
+                continue
+            except (OSError, RecursionError, ValueError) as error:
+                _log.warning("hub: ignoring %s, which cannot be used: %s", path, error)
+                continue
+            stored = _Stored(
+                snapshot=snapshot,
+                rows=_rows(snapshot, received_at),
+                received_at=received_at,
+                last_seen_at=last_seen_at,
+                written_last_seen=last_seen_at,
+                written_at=self._clock(),
+            )
+            with self._lock:
+                self._stored[machine.name] = stored
+
+    def knows(self, name: str) -> bool:
+        """Whether `name` is one of the configured machines."""
+        return name in self._writing
+
+    def replace(self, snapshot: Snapshot) -> datetime:
+        """Make `snapshot` its machine's stored one and return when it was received. The file is
+        replaced in one step; memory changes only once it has been. Raises OSError (file and
+        memory as they were) or KeyError for a machine that is not configured."""
+        name = snapshot.machine
+        with self._writing[name]:
+            now = self._clock()
+            stored = _Stored(
+                snapshot=snapshot,
+                rows=_rows(snapshot, now),
+                received_at=now,
+                last_seen_at=now,
+                written_last_seen=now,
+                written_at=now,
+            )
+            self._write(name, _content(stored))
+            with self._lock:
+                self._stored[name] = stored
+        return now
+
+    def heartbeat(self, name: str, digest: str) -> bool:
+        """True when `name`'s stored snapshot has `digest`: the machine is seen now (written to
+        its file at most once every `LAST_SEEN_FLUSH` seconds). False when there is no such
+        snapshot, so the machine should push it."""
+        with self._lock:
+            stored = self._stored.get(name)
+            if stored is None or stored.snapshot.digest != digest:
+                return False
+            stored.last_seen_at = self._clock()
+        self._flush(name, force=False)
+        return True
+
+    def flush(self, *, force: bool = False) -> None:
+        """Write each machine's `last_seen_at` that changed since its file was written, when that
+        was at least `LAST_SEEN_FLUSH` seconds ago or with `force`. A failed write is logged."""
+        for machine in self._machines:
+            self._flush(machine.name, force=force)
+
+    def _flush(self, name: str, *, force: bool) -> None:
+        with self._writing[name]:
+            with self._lock:
+                stored = self._stored.get(name)
+                if stored is None or stored.last_seen_at == stored.written_last_seen:
+                    return
+                now = self._clock()
+                due = (now - stored.written_at).total_seconds() >= LAST_SEEN_FLUSH
+                if not (force or due):
+                    return
+                content = _content(stored)
+                seen = stored.last_seen_at
+            try:
+                self._write(name, content)
+            except OSError as error:
+                _log.warning("hub: could not write when %s was last seen: %s", name, error)
+                return
+            with self._lock:
+                stored.written_last_seen = seen
+                stored.written_at = now
+
+    def _write(self, name: str, content: dict[str, Any]) -> None:
+        """Replace `<name>.json` with `content`: a temporary file (0600) in the folder (0700),
+        `fsync`, rename. Raises OSError, leaving no temporary file behind."""
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.directory, 0o700)
+        path = self.directory / f"{name}.json"
+        temporary = self.directory / f".{name}.json.{secrets.token_hex(8)}"
+        data = json.dumps(content, ensure_ascii=False).encode()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            fd = os.open(temporary, flags, 0o600)
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        directory = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def machines(self) -> list[MachineState]:
+        """Every configured machine, in the config's order."""
+        now = self._clock()
+        with self._lock:
+            stored = dict(self._stored)
+        states: list[MachineState] = []
+        for machine in self._machines:
+            item = stored.get(machine.name)
+            seen = item.last_seen_at if item is not None else None
+            states.append(
+                MachineState(
+                    name=machine.name,
+                    url=machine.url,
+                    last_snapshot_at=item.received_at if item is not None else None,
+                    last_seen_at=seen,
+                    live_checked_at=item.snapshot.live_checked_at if item is not None else None,
+                    stale=seen is None or now - seen > self._stale_after,
+                    session_count=len(item.rows) if item is not None else 0,
+                )
+            )
+        return states
+
+    def sessions(self) -> list[HubSession]:
+        """Every stored session, machine by machine in the config's order, as pushed (with
+        `received_at`)."""
+        with self._lock:
+            stored = dict(self._stored)
+        return [
+            row
+            for machine in self._machines
+            if (item := stored.get(machine.name)) is not None
+            for row in item.rows
+        ]
