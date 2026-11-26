@@ -1018,3 +1018,111 @@ def test_local_sessions_have_hub_fields(web_client: TestClient) -> None:
 def test_machines_empty_and_mode_local_on_local_vigil(web_client: TestClient) -> None:
     assert web_client.get("/api/v1/machines").json() == []
     assert web_client.get("/api/v1/health").json()["mode"] == "local"
+
+
+# Live-state timestamp for the push client (vigil hub, Task 17).
+from vigil.web import LIVE_TTL, LiveStatus  # noqa: E402
+
+
+def test_live_status_checked_at_and_peek(vigil_env: VigilEnv, tmp_path: Path) -> None:
+    live = [{"sessionId": NAMED, "kind": "background", "status": "busy"}]
+    install_claude(vigil_env, transcript=tmp_path / "x", link=None, live=live)
+    ticks = [100.0]
+    wall = datetime(2026, 11, 25, 18, 0, tzinfo=UTC)
+    status = LiveStatus(clock=lambda: ticks[0], wall=lambda: wall)
+    assert status.checked_at is None
+    assert status.peek() is None  # nothing cached, and peek never probes
+    assert vigil_env.bin.calls("claude") == []
+
+    caps, sessions = status.get()
+    assert caps.has_agents_json and sessions[NAMED].busy
+    assert status.checked_at == wall
+    calls = len(vigil_env.bin.calls("claude"))
+    ticks[0] += LIVE_TTL * 100  # long past the TTL
+    assert status.peek() == (caps, sessions, wall)
+    assert len(vigil_env.bin.calls("claude")) == calls
+
+    later = wall + timedelta(minutes=5)
+    status = LiveStatus(clock=lambda: ticks[0], wall=lambda: later)
+    assert status.probe() is not None
+    assert status.checked_at == later
+    peeked = status.peek()
+    assert peeked is not None and peeked[2] == later
+
+
+# Health `hub` and serving while pushing (vigil hub, Task 19).
+import time  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+import httpx  # noqa: E402
+
+from tests.conftest import LOOPBACK_URL, PUSH_LAPTOP, FakeHub  # noqa: E402
+
+
+def eventually(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Wait, a few milliseconds at a time, until `condition()` holds; fail after `timeout`."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.005)
+
+
+@contextmanager
+def pushing_client(env: VigilEnv, tmp_path: Path, hub: FakeHub) -> Iterator[TestClient]:
+    """The service of `web_client` with `[hub]` set, pushing to `hub`."""
+    token = tmp_path / "hub-token"
+    token.write_text(PUSH_LAPTOP + "\n")
+    token.chmod(0o600)
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "vigil" / "config.toml"
+    config.write_text(
+        f'claude_home = "{env.claude_home}"\nmachine = "laptop"\n\n'
+        f'[hub]\nurl = "https://hub.example.com"\ntoken_file = "{token}"\n'
+    )
+    app = create_app(
+        load_config(),
+        conn_factory=lambda: connect(env.index),
+        start_watcher=False,
+        hub_transport=hub,
+    )
+    with TestClient(app, base_url=LOOPBACK_URL, headers={"Origin": LOOPBACK_URL}) as client:
+        yield client
+
+
+def test_health_hub_field(vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path) -> None:
+    assert web_client.get("/api/v1/health").json()["hub"] is None
+    hub = FakeHub()
+    with pushing_client(vigil_env, tmp_path, hub) as client:
+
+        def pushed() -> bool:
+            return client.get("/api/v1/health").json()["hub"]["last_push_at"] is not None
+
+        eventually(pushed)
+        data = client.get("/api/v1/health").json()["hub"]
+        assert data["url"] == "https://hub.example.com"
+        assert datetime.fromisoformat(data["last_push_at"]).tzinfo is not None
+        assert data["last_error"] is None
+    (put,) = [request for request in hub.requests if request.method == "PUT"]
+    assert put.url.path == "/ingest/laptop/sessions"
+    sent = json.loads(put.content)
+    assert sent["machine"] == "laptop"
+    assert {session["machine"] for session in sent["sessions"]} == {"laptop"}
+
+
+def test_serving_unaffected_by_unreachable_hub(
+    vigil_env: VigilEnv, web_client: TestClient, tmp_path: Path
+) -> None:
+    hub = FakeHub()
+    hub.fail = httpx.ConnectError
+    with pushing_client(vigil_env, tmp_path, hub) as client:
+
+        def failed() -> bool:
+            return client.get("/api/v1/health").json()["hub"]["last_error"] is not None
+
+        eventually(failed)
+        response = client.get("/api/v1/sessions")
+        assert response.status_code == 200
+        assert len(response.json()) == len(web_client.get("/api/v1/sessions").json())
+        health = client.get("/api/v1/health").json()
+        assert "cannot reach the hub" in health["hub"]["last_error"]
+        assert health["hub"]["last_push_at"] is None

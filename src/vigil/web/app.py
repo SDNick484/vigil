@@ -6,6 +6,7 @@ import functools
 import sqlite3
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, FastAPI
@@ -16,7 +17,8 @@ from vigil.hub import HUB_DIR, HubStore
 from vigil.index.db import connect
 from vigil.index.scanner import ScanStats
 from vigil.paths import data_dir, index_path
-from vigil.peers import CACHE_DIR, PeerHub
+from vigil.peers import CACHE_DIR, PeerHub, local_machine
+from vigil.push import HubPusher, build_snapshot, run_push_loop
 from vigil.review.runner import STOPPED
 from vigil.review.store import fail_if_running, fail_running
 from vigil.web import WebState, api, auth, hub_pages, ingest, pages, review, watcher
@@ -46,6 +48,7 @@ def create_app(
     start_watcher: bool = True,
     peer_transport: httpx.BaseTransport | None = None,
     access_transport: httpx.BaseTransport | None = None,
+    hub_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     """The vigil web service.
 
@@ -64,6 +67,10 @@ def create_app(
     raises RuntimeError), no watcher and no review, and nothing runs `claude`; `start_watcher`
     is ignored. The machines' snapshots (`vigil.hub.HubStore`, in the data dir's `hub/`) are
     read on startup, and when each was last seen is written on shutdown.
+
+    With `config.hub`, this machine's sessions are pushed to that hub while the service runs
+    (`vigil.push.run_push_loop`, started after the watcher, whose scans it follows; stopped on
+    shutdown); `hub_transport` replaces the network for those requests (tests).
     """
     remote = auth.load_auth(config.server, data_dir(), access_transport=access_transport)
     is_hub = config.mode == "hub"
@@ -72,12 +79,27 @@ def create_app(
     web = WebState(config=config, conn_factory=factory, peers=hub)
     if is_hub:
         web.hub = HubStore(data_dir() / HUB_DIR, config.machines, config.hub_mode.stale_after)
+    hub_config = config.hub if not is_hub else None
+    if hub_config is not None:
+        web.pusher = HubPusher(hub_config, local_machine(config), transport=hub_transport)
+    changed: asyncio.Event | None = None
+    """Set after each scan while the push loop runs: the snapshot is built again."""
 
     def scanned(stats: ScanStats) -> None:
         web.last_scan_at = datetime.now(UTC)
+        if changed is not None:
+            changed.set()
+
+    def snapshot_now() -> dict[str, Any]:
+        conn = factory()
+        try:
+            return build_snapshot(conn, config, web.live, datetime.now(UTC))
+        finally:
+            conn.close()
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        nonlocal changed
         if web.hub is not None:
             store = web.hub
             await asyncio.to_thread(store.load)
@@ -100,9 +122,23 @@ def create_app(
                 ),
                 name="vigil-watcher",
             )
+        pushing: asyncio.Task[None] | None = None
+        if web.pusher is not None and hub_config is not None:
+            changed = asyncio.Event()
+            pushing = asyncio.create_task(
+                run_push_loop(
+                    web.pusher, snapshot_now, web.live, hub_config.live_interval, changed
+                ),
+                name="vigil-push",
+            )
         try:
             yield
         finally:
+            if pushing is not None:
+                pushing.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pushing
+                changed = None
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

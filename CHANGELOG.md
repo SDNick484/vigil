@@ -42,6 +42,7 @@ All notable changes to this project are recorded here, in the style of
 - `[server.access]`: verify Cloudflare Access assertions on proxied requests and map emails and service tokens to scopes.
 - Hub mode (`mode = "hub"`): no index or `claude`; machines push their sessions to `PUT /ingest/{name}/sessions` with a `push` credential.
 - Hub listing: `/api/v1/sessions` across machines with `stale`, `received_at`, `resume_url` and `machine_url`; `/api/v1/machines`; health `mode`; the hub's sessions and session pages.
+- `[hub]`: `vigil serve` pushes this machine's sessions to a hub, with live state probed every `hub.live_interval` seconds.
 
 ### Changed
 - Install guide rewritten step by step: install without pipx (a virtual environment), checks after each step, which way to keep vigil running, upgrade, uninstall and troubleshooting; the service files also look for `claude` in `/opt/bin`.

@@ -467,3 +467,83 @@ def snapshot_body(
         "live_checked_at": None,
         "sessions": sessions,
     }
+
+
+# The push client (vigil hub, Task 18).
+class FakeHub(httpx.MockTransport):
+    """A hub for a pushing machine: every request it gets is in `requests` (body read). Answers
+    are taken from `script` first (a status code, a response, or a transport error class to
+    raise); then `fail` (the same kinds) when set; else 200 with what the real hub answers."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.script: list[int | httpx.Response | type[httpx.TransportError]] = []
+        self.fail: int | httpx.Response | type[httpx.TransportError] | None = None
+        super().__init__(self._answer)
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
+        request.read()
+        self.requests.append(request)
+        answer = self.script.pop(0) if self.script else self.fail
+        if answer is None:
+            if request.url.path.endswith("/heartbeat"):
+                return httpx.Response(200, json={"ok": True})
+            return httpx.Response(200, json={"ok": True, "received_at": "2026-11-25T18:04:06Z"})
+        if isinstance(answer, int):
+            return httpx.Response(answer, json={"ok": False, "need_snapshot": answer == 409})
+        if isinstance(answer, httpx.Response):
+            return answer
+        raise answer("the hub cannot be reached", request=request)
+
+    def sent(self) -> list[tuple[str, str]]:
+        """`(method, path)` of every request, in order."""
+        return [(request.method, request.url.path) for request in self.requests]
+
+
+class HubRelay(httpx.MockTransport):
+    """Sends each request on to a hub app, as a client on another machine
+    (`HUB_REMOTE_PEER`) reaching `HUB_URL`, while `down` is False; while it is True, every request
+    fails to connect. `restart(app)` puts another app (its lifespan started) in place of the
+    current one."""
+
+    def __init__(self, app: FastAPI) -> None:
+        self.down = False
+        self._client = self._open(app)
+        super().__init__(self._answer)
+
+    @staticmethod
+    def _open(app: FastAPI) -> TestClient:
+        client = TestClient(app, base_url=HUB_URL, client=HUB_REMOTE_PEER, follow_redirects=False)
+        client.__enter__()
+        return client
+
+    def restart(self, app: FastAPI) -> None:
+        self.close_hub()
+        self._client = self._open(app)
+
+    def close_hub(self) -> None:
+        self._client.__exit__(None, None, None)
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
+        if self.down:
+            raise httpx.ConnectError("connection refused", request=request)
+        skip = {"host", "content-length", "transfer-encoding"}
+        response = self._client.request(
+            request.method,
+            request.url.raw_path.decode("ascii"),
+            headers={key: value for key, value in request.headers.items() if key not in skip},
+            content=request.read(),
+        )
+        return httpx.Response(
+            response.status_code,
+            headers={"content-type": response.headers.get("content-type", "")},
+            content=response.content,
+        )
+
+
+@pytest.fixture
+def hub_transport(hub_app: FastAPI) -> Iterator[HubRelay]:
+    """A transport that relays a pushing machine's requests to `hub_app` (`HubRelay`)."""
+    relay = HubRelay(hub_app)
+    yield relay
+    relay.close_hub()

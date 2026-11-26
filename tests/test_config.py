@@ -430,3 +430,66 @@ def test_hub_mode_refused(tmp_path: Path, text: str, where: str) -> None:
 def test_hub_mode_refused_more(tmp_path: Path, text: str, where: str) -> None:
     with pytest.raises(ConfigError, match=re.escape(where)):
         load_config(write(tmp_path, text))
+
+
+# The push client's `[hub]` (vigil hub, Task 16).
+from vigil.config import HubClientConfig  # noqa: E402
+
+_HUB_CLIENT = 'machine = "laptop"\n\n[hub]\nurl = "https://hub.example.com"\n'
+_BEARER = 'token_file = "/home/user/.config/vigil/hub-token"\n'
+_ACCESS = (
+    'access_client_id = "client-id-placeholder.access"\n'
+    'access_secret_file = "/home/user/.config/vigil/hub-secret"\n'
+)
+
+
+def test_hub_client_config_parsed(tmp_path: Path) -> None:
+    config = load_config(write(tmp_path, _HUB_CLIENT + _ACCESS + "live_interval = 60\n"))
+    assert config.hub == HubClientConfig(
+        url="https://hub.example.com",
+        access_client_id="client-id-placeholder.access",
+        access_secret_file=Path("/home/user/.config/vigil/hub-secret"),
+        live_interval=60,
+    )
+    config = load_config(
+        write(
+            tmp_path,
+            'machine = "laptop"\n\n[hub]\nurl = "http://Hub.Example.com:7787/"\n' + _BEARER,
+        )
+    )
+    assert config.hub == HubClientConfig(
+        url="http://hub.example.com:7787",
+        token_file=Path("/home/user/.config/vigil/hub-token"),
+    )
+    assert config.hub.live_interval == 900
+    assert load_config(write(tmp_path, "")).hub is None
+
+
+@pytest.mark.parametrize(
+    ("text", "where"),
+    [
+        (_HUB_CLIENT, "hub.token_file"),  # no credential
+        (_HUB_CLIENT + _BEARER + _ACCESS, "hub.token_file"),  # both kinds
+        (_HUB_CLIENT + 'access_client_id = "client-id-placeholder.access"\n', "hub.access_"),
+        (_HUB_CLIENT + 'access_secret_file = "/home/user/hub-secret"\n', "hub.access_"),
+        (_HUB_CLIENT + _BEARER + "live_interval = 59\n", "hub.live_interval"),
+        (_HUB_CLIENT + _BEARER + "live_interval = 3601\n", "hub.live_interval"),
+        (_HUB_CLIENT + _BEARER + "live_interval = 90.5\n", "hub.live_interval"),
+        (
+            'machine = "laptop"\n\n[hub]\nurl = "https://hub.example.com/path"\n' + _BEARER,
+            "hub.url",
+        ),
+        ('[hub]\nurl = "https://hub.example.com"\n' + _BEARER, "`machine`"),
+        (
+            'machine = "my laptop"\n\n[hub]\nurl = "https://hub.example.com"\n' + _BEARER,
+            "`machine`",
+        ),
+        ('mode = "hub"\n' + _HUB_CLIENT + _BEARER, "[hub]"),
+        (_HUB_CLIENT.replace("url = ", "address = ") + _BEARER, "hub.address"),
+        ('machine = "laptop"\n\n[hub]\n' + _BEARER, "hub.url"),
+        ('machine = "laptop"\nhub = "https://hub.example.com"\n', "`hub`"),
+    ],
+)
+def test_hub_client_refused(tmp_path: Path, text: str, where: str) -> None:
+    with pytest.raises(ConfigError, match=re.escape(where)):
+        load_config(write(tmp_path, text))

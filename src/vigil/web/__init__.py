@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 
 from fastapi import HTTPException, Request
@@ -30,6 +30,7 @@ from vigil.claude_cli import (
 from vigil.config import Config, load_config
 from vigil.hub import HubStore
 from vigil.peers import PeerHub
+from vigil.push import HubPusher
 from vigil.review.runner import ReviewSlot
 
 LIVE_TTL = 5.0
@@ -38,14 +39,32 @@ LIVE_TTL = 5.0
 
 class LiveStatus:
     """The installed claude's capabilities and its live sessions, cached for `ttl` seconds so a
-    burst of requests runs `claude` once. Safe to use from several threads."""
+    burst of requests runs `claude` once. Safe to use from several threads.
 
-    def __init__(self, ttl: float = LIVE_TTL, clock: Callable[[], float] = time.monotonic) -> None:
+    `checked_at` is the wall time (`wall`) of the last successful probe, and `peek` gives the
+    cached value with that time whatever its age: the push loop (`vigil.push`) uses a probe a
+    page made rather than run `claude` again."""
+
+    def __init__(
+        self,
+        ttl: float = LIVE_TTL,
+        clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         self._ttl = ttl
         self._clock = clock
+        self._wall = wall
         self._lock = threading.Lock()
         self._value: tuple[Capabilities, dict[str, LiveSession]] | None = None
         self._at = 0.0
+        self._checked_at: datetime | None = None
+        """Wall time of the probe that gave `_value`; kept when a later probe fails."""
+
+    @property
+    def checked_at(self) -> datetime | None:
+        """Wall time of the last successful probe by `get` or `probe`; None before the first."""
+        with self._lock:
+            return self._checked_at
 
     def get(self, *, fresh: bool = False) -> tuple[Capabilities, dict[str, LiveSession]]:
         """`(capabilities, live sessions)`; with `fresh`, probed now rather than from the cache."""
@@ -55,6 +74,7 @@ class LiveStatus:
                 caps = capabilities()
                 self._value = (caps, live_sessions(caps))
                 self._at = now
+                self._checked_at = self._wall()
             return self._value
 
     def probe(self) -> dict[str, LiveSession] | None:
@@ -65,7 +85,18 @@ class LiveStatus:
             live = live_sessions_or_none(caps)
             self._value = (caps, live) if live is not None else None
             self._at = self._clock()
+            if live is not None:
+                self._checked_at = self._wall()
             return live
+
+    def peek(self) -> tuple[Capabilities, dict[str, LiveSession], datetime] | None:
+        """The cached `(capabilities, live sessions, checked_at)`, however old; None when nothing
+        is cached. Never runs `claude`."""
+        with self._lock:
+            if self._value is None or self._checked_at is None:
+                return None
+            caps, live = self._value
+            return caps, live, self._checked_at
 
     def clear(self) -> None:
         """Forget the cached value, so the next `get` probes again."""
@@ -90,6 +121,8 @@ class WebState:
     """Taken while a session review runs: one at a time (`vigil.web.review`)."""
     hub: HubStore | None = None
     """The machines' snapshots; set only in hub mode (`mode = "hub"`)."""
+    pusher: HubPusher | None = None
+    """Sends this machine's sessions to the hub in `[hub]`; None without `[hub]`."""
 
     def reload_config(self) -> None:
         """Re-read the config file (`vigil.paths.config_path`, where `vigil serve` reads it) after
