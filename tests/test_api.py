@@ -1001,3 +1001,20 @@ def test_sessions_have_remote_urls(web_client: TestClient) -> None:
     items = web_client.get("/api/v1/sessions").json()
     assert items
     assert all(isinstance(item["remote_urls"], list) for item in items)
+
+
+def test_local_sessions_have_hub_fields(web_client: TestClient) -> None:
+    items = web_client.get("/api/v1/sessions").json()
+    assert items
+    for item in items:
+        assert item["stale"] is False
+        assert item["received_at"] is None
+        assert item["resume_url"] is None
+        assert item["machine_url"] is None
+    detail = web_client.get(f"/api/v1/sessions/{items[0]['id']}").json()
+    assert detail["stale"] is False and detail["machine_url"] is None
+
+
+def test_machines_empty_and_mode_local_on_local_vigil(web_client: TestClient) -> None:
+    assert web_client.get("/api/v1/machines").json() == []
+    assert web_client.get("/api/v1/health").json()["mode"] == "local"

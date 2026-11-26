@@ -22,6 +22,7 @@ import vigil
 from vigil.catalog import current_catalog
 from vigil.claude_cli import Capabilities, LiveSession
 from vigil.commands import resume_command
+from vigil.hub import find_hub_session, hub_projects, hub_rows
 from vigil.index.db import to_db
 from vigil.index.queries import (
     UNSET,
@@ -34,7 +35,7 @@ from vigil.index.queries import (
     list_sessions,
     set_meta,
 )
-from vigil.peers import ResumeForwardError
+from vigil.peers import ResumeForwardError, filter_sessions
 from vigil.remote import find_transcript, wait_for_remote_url
 from vigil.resume import (
     TERMINAL_ALLOWED,
@@ -92,6 +93,10 @@ class SessionOut(BaseModel):
     remote_urls: list[str]
     open_url: str | None
     busy: bool
+    stale: bool
+    received_at: str | None
+    resume_url: str | None
+    machine_url: str | None
 
 
 class SessionDetailOut(SessionOut):
@@ -138,6 +143,7 @@ class UsageOut(BaseModel):
 
 class HealthOut(BaseModel):
     status: Literal["ok"]
+    mode: Literal["local", "hub"]
     version: str
     claude_version: str | None
     indexed_sessions: int
@@ -179,6 +185,20 @@ class ForwardedResumeOut(ResumeOut):
     machine: str
 
 
+class MachineOut(BaseModel):
+    """A machine a hub lists and when it last pushed (`last_snapshot_at`) and was last heard from
+    (`last_seen_at`, moved by heartbeats); `live_checked_at` is when the machine last asked
+    `claude` which sessions are live. `stale` when it was never heard from, or not lately."""
+
+    name: str
+    url: str | None
+    last_snapshot_at: str | None
+    last_seen_at: str | None
+    live_checked_at: str | None
+    stale: bool
+    session_count: int
+
+
 class PeerOut(BaseModel):
     """A configured peer (v2) and how its last fetch went: `stale` when it could not be reached
     (then `error` says why, and `fetched_at` is when its last-known sessions were fetched)."""
@@ -213,7 +233,22 @@ def sessions(
     ] = False,
     limit: Annotated[int, Query(ge=1, le=10_000)] = 200,
 ) -> list[dict[str, object]]:
-    """Sessions, newest activity first; one per resume chain unless `all`."""
+    """Sessions, newest activity first; one per resume chain unless `all`. On a hub, every
+    machine's sessions as it last pushed them."""
+    if (hub := state(request).hub) is not None:
+        found = filter_sessions(
+            hub_rows(hub, state(request).config),
+            query=q,
+            project_key=project,
+            since=since,
+            include_archived=all_,
+            collapse_chains=not all_,
+        )
+        if cwd is not None:
+            found = [row for row in found if row.cwd == cwd]
+        if status is not None:
+            found = [row for row in found if row.status == status]
+        return [session_to_dict(row) for row in found[:limit]]
     filtered_later = status is not None or cwd is not None
     with connection(request) as conn:
         rows = list_sessions(
@@ -235,7 +270,16 @@ def sessions(
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailOut)
 def session_detail(request: Request, session_id: str) -> dict[str, object]:
-    """One session by id, unique id prefix or exact title, with its chain."""
+    """One session by id, unique id prefix or exact title, with its chain. On a hub, the chain
+    is the session alone (a snapshot holds one session per chain)."""
+    if (hub := state(request).hub) is not None:
+        found = find_hub_session(hub_rows(hub, state(request).config), session_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail=_no_session(session_id))
+        data = session_to_dict(found)
+        data["chain"] = [session_to_dict(found)]
+        data["resume_command"] = resume_command(found)
+        return data
     with connection(request) as conn:
         row = get_session(conn, session_id)
         if row is None:
@@ -251,8 +295,11 @@ def session_detail(request: Request, session_id: str) -> dict[str, object]:
 @router.get("/projects", response_model=list[ProjectOut])
 def projects(request: Request) -> list[dict[str, object]]:
     """Projects (git remote, else folder), newest activity first."""
-    with connection(request) as conn:
-        rows = list_projects(conn)
+    if (hub := state(request).hub) is not None:
+        rows = hub_projects(hub_rows(hub, state(request).config))
+    else:
+        with connection(request) as conn:
+            rows = list_projects(conn)
     return [
         {
             "project_key": row.project_key,
@@ -295,7 +342,10 @@ def catalog(request: Request) -> list[dict[str, object]]:
 @router.get("/peers", response_model=list[PeerOut])
 def peers(request: Request) -> list[dict[str, object]]:
     """The configured peers, each asked for its sessions unless asked moments ago. Their sessions
-    are not part of `/api/v1/sessions`, which lists this machine's only (it is what peers read)."""
+    are not part of `/api/v1/sessions`, which lists this machine's only (it is what peers read).
+    A hub has no peers."""
+    if state(request).hub is not None:
+        return []
     hub = state(request).peers
     results = hub.results()
     return [
@@ -311,17 +361,38 @@ def peers(request: Request) -> list[dict[str, object]]:
     ]
 
 
+@router.get("/machines", response_model=list[MachineOut])
+def machines(request: Request) -> list[dict[str, object]]:
+    """The machines a hub lists, in the config's order, and when each last pushed and was heard
+    from; empty on a vigil that is not a hub."""
+    if (hub := state(request).hub) is None:
+        return []
+    return [
+        {
+            "name": machine.name,
+            "url": machine.url,
+            "last_snapshot_at": to_db(machine.last_snapshot_at),
+            "last_seen_at": to_db(machine.last_seen_at),
+            "live_checked_at": to_db(machine.live_checked_at),
+            "stale": machine.stale,
+            "session_count": machine.session_count,
+        }
+        for machine in hub.machines()
+    ]
+
+
 @router.get("/health", response_model=HealthOut)
 def health(request: Request) -> dict[str, object]:
     """Whether the service is up, what it runs, and how much it has indexed. A hub has no index
     and runs no `claude`."""
     web = state(request)
-    if web.config.mode == "hub":
+    if web.hub is not None:
         return {
             "status": "ok",
+            "mode": "hub",
             "version": vigil.__version__,
             "claude_version": None,
-            "indexed_sessions": 0,
+            "indexed_sessions": sum(machine.session_count for machine in web.hub.machines()),
             "last_scan_at": None,
         }
     with connection(request) as conn:
@@ -329,6 +400,7 @@ def health(request: Request) -> dict[str, object]:
     caps, _ = web.live.get()
     return {
         "status": "ok",
+        "mode": "local",
         "version": vigil.__version__,
         "claude_version": caps.version,
         "indexed_sessions": count,

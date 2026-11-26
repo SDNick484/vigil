@@ -1,5 +1,8 @@
 """The HTML pages (`router`): the sessions list, the session detail page and the static files.
 
+On a hub (`mode = "hub"`) the sessions list is every machine's pushed sessions (`vigil.hub`), and
+a session's page is `/machines/{name}/sessions/{id}` (`vigil.web.hub_pages`).
+
 With peers configured (v2, `vigil.peers`), the sessions list merges in the peers' sessions with a
 machine column, filtered here as the index filters this machine's own, and a peer's session has a
 detail page under `/peers/{name}/sessions/{id}` built from what the peer last sent.
@@ -21,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from vigil.catalog import current_catalog
 from vigil.commands import resume_command
+from vigil.hub import HubSession, hub_rows
 from vigil.index.queries import (
     SessionRow,
     chain,
@@ -78,6 +82,8 @@ def peer_of(row: SessionRow) -> str | None:
 def session_url(row: SessionRow, session_id: str | None = None) -> str:
     """The detail page of `row` (or of `session_id` on the same machine)."""
     ident = quote(session_id or row.session_id, safe="")
+    if isinstance(row, HubSession):
+        return f"/machines/{quote(row.machine, safe='')}/sessions/{ident}"
     peer = peer_of(row)
     return f"/peers/{quote(peer, safe='')}/sessions/{ident}" if peer else f"/sessions/{ident}"
 
@@ -85,6 +91,8 @@ def session_url(row: SessionRow, session_id: str | None = None) -> str:
 def row_key(row: SessionRow) -> str:
     """A name for `row` that is unique on the page (ids repeat across machines), for element ids
     and for `open_links`."""
+    if isinstance(row, HubSession):
+        return f"{row.machine}-{row.session_id}"
     peer = peer_of(row)
     return f"{peer}-{row.session_id}" if peer else row.session_id
 
@@ -124,17 +132,17 @@ templates.env.globals["resume_url"] = resume_url
 templates.env.globals["restart_url"] = restart_url
 templates.env.globals["row_key"] = row_key
 templates.env.globals["wall_clock"] = wall_clock
+templates.env.globals["resume_command"] = resume_command
 
 
 def _stale(row: SessionRow) -> bool:
-    return isinstance(row, PeerSession) and row.stale
+    return row.stale
 
 
 def is_active(row: SessionRow) -> bool:
     """Whether `row` is running or in the background right now. A stale peer row is what the peer
     last sent, not what is happening, so it is never active."""
-    stale = isinstance(row, PeerSession) and row.stale
-    return row.status in ("running", "background") and not stale
+    return row.status in ("running", "background") and not row.stale
 
 
 templates.env.globals["is_active"] = is_active
@@ -219,20 +227,37 @@ def sessions_page(
     all_: Annotated[bool, Query(alias="all")] = False,
 ) -> Any:
     """Sessions grouped by project, newest activity first. A request from htmx (the live search)
-    gets just the results, to swap into the page."""
-    with connection(request) as conn:
-        rows = list_sessions(
-            conn,
+    gets just the results, to swap into the page. On a hub, the sessions of every machine as it
+    last pushed them."""
+    web = state(request)
+    offline: list[tuple[str, datetime | None, str]] = []
+    last_seen: dict[str, datetime | None] = {}
+    quiet_machines: list[tuple[str, datetime | None]] = []
+    rows: list[SessionRow]
+    if web.hub is not None:
+        found = filter_sessions(
+            hub_rows(web.hub, web.config),
             query=q or None,
             project_key=project or None,
             include_archived=all_,
             collapse_chains=not all_,
-            limit=LIST_LIMIT,
         )
-    web = state(request)
-    caps, live = web.live.get()
-    rows = apply_status(rows, caps, live)
-    offline: list[tuple[str, datetime | None, str]] = []
+        rows = [*found[:LIST_LIMIT]]
+        states = web.hub.machines()
+        last_seen = {machine.name: machine.last_seen_at for machine in states}
+        quiet_machines = [(m.name, m.last_seen_at) for m in states if m.stale]
+    else:
+        with connection(request) as conn:
+            rows = list_sessions(
+                conn,
+                query=q or None,
+                project_key=project or None,
+                include_archived=all_,
+                collapse_chains=not all_,
+                limit=LIST_LIMIT,
+            )
+        caps, live = web.live.get()
+        rows = apply_status(rows, caps, live)
     if web.config.peers:
         merged = with_machine(rows, local_machine(web.config))
         for name, result in web.peers.results().items():
@@ -258,7 +283,10 @@ def sessions_page(
         "q": q,
         "project": project,
         "all": all_,
-        "machines": bool(web.config.peers),
+        "machines": bool(web.config.peers) or web.hub is not None,
+        "hub": web.hub is not None,
+        "last_seen": last_seen,
+        "quiet_machines": quiet_machines,
         "offline": offline,
         "open_links": open_links(rows),
         "busy": busy_keys(rows),

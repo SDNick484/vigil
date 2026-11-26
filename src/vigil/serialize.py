@@ -31,6 +31,11 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
     - `open_url` is the link to join the session by right now (`open_link`: it is live and the
       link is from its current run), else null; null too where the live sessions are not known.
     - `busy` is true when the session is live and working on something now, else false.
+    - `stale` is true when the machine the session is on could not be reached (a peer) or heard
+      from lately (a hub): everything else is then its last-known state. `received_at` (ISO 8601,
+      or null) is when a hub accepted the snapshot the session came from; `resume_url` the
+      session's page on the hub and `machine_url` the owning machine's vigil, null where there
+      is none (always, on a vigil that is not a hub).
     - `models` is a sorted list; `status` is `running`, `background`, `idle` or `unknown`.
     """
     return {
@@ -64,6 +69,10 @@ def session_to_dict(row: SessionRow) -> dict[str, object]:
         "remote_urls": list(row.remote_urls),
         "open_url": row.open_url,
         "busy": row.busy,
+        "stale": row.stale,
+        "received_at": to_db(row.received_at),
+        "resume_url": row.resume_url,
+        "machine_url": row.machine_url,
     }
 
 

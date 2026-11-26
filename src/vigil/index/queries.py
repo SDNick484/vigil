@@ -55,6 +55,15 @@ class SessionRow:
     busy: bool = False
     """The live session is working right now (`LiveSession.busy`), set by `apply_status`; False
     when it is not live or the live sessions are not known."""
+    stale: bool = False
+    """Where the session is (a peer, a hub's machine) could not be reached or heard from lately:
+    this is its last-known state."""
+    received_at: datetime | None = None
+    """On a hub, when it accepted the snapshot this session came from."""
+    resume_url: str | None = None
+    """On a hub, the page of the session there (`hub_mode.public_url`)."""
+    machine_url: str | None = None
+    """On a hub, the owning machine's own vigil (`[[machines]] url`)."""
 
 
 @dataclass(frozen=True)

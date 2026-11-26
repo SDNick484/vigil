@@ -55,6 +55,9 @@
   <p class="result refused peer-offline">{{ name }} cannot be reached ({{ error }}).
     {% if fetched_at %}Its sessions as of {{ fetched_at|when }} are shown, marked stale.{% else %}None of its sessions are known yet.{% endif %}</p>
   {% endfor %}
+  {% for name, seen in quiet_machines %}
+  <p class="result refused peer-offline">{% if seen %}{{ name }} last seen {{ seen|when }}; its sessions are shown as it last sent them, marked stale.{% else %}{{ name }} has not been heard from yet.{% endif %}</p>
+  {% endfor %}
   {% if active %}
   <h2 class="section-label">Active now</h2>
   {% for group in active %}{{ project_card(group, true) }}{% endfor %}

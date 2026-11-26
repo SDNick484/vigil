@@ -95,7 +95,9 @@ def test_parse_valid_snapshot(index_db: sqlite3.Connection) -> None:
     assert len(parsed.sessions) == len(rows)
     for got, sent in zip(parsed.sessions, sessions, strict=True):
         assert "extra" not in got
-        assert got == {key: value for key, value in sent.items() if key != "extra"}
+        # The fields only the hub sets are dropped along with the unknown ones.
+        dropped = {"extra", "stale", "received_at", "resume_url", "machine_url"}
+        assert got == {key: value for key, value in sent.items() if key not in dropped}
     hub_rows = [session_from_snapshot(item, "laptop") for item in parsed.sessions]
     assert [row.session_id for row in hub_rows] == [row.session_id for row in rows]
     for hub_row, row in zip(hub_rows, rows, strict=True):

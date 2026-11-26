@@ -25,11 +25,12 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast, get_args
+from urllib.parse import quote
 
-from vigil.config import HubMachine
+from vigil.config import Config, HubMachine
 from vigil.index.db import to_db
-from vigil.index.queries import SessionRow, Status
-from vigil.peers import _SESSION_ID
+from vigil.index.queries import ProjectRow, SessionRow, Status
+from vigil.peers import _SESSION_ID, newest_first
 from vigil.transcript import MAX_REMOTE_URLS, REMOTE_URL
 
 SNAPSHOT_FORMAT = 1
@@ -85,9 +86,6 @@ class Snapshot:
 @dataclass(frozen=True)
 class HubSession(SessionRow):
     """A session a machine pushed to this hub; `machine` is the name it pushed as."""
-
-    received_at: datetime | None = None
-    """When the hub accepted the snapshot this session came from."""
 
 
 def canonical_digest(sessions: list[Any]) -> str:
@@ -541,3 +539,75 @@ class HubStore:
             if (item := stored.get(machine.name)) is not None
             for row in item.rows
         ]
+
+
+def hub_rows(store: HubStore, config: Config) -> list[HubSession]:
+    """Every stored session, newest activity first, as the API and the pages serve them: `stale`
+    from its machine (`HubStore.machines`), `received_at`, `machine_url` from `[[machines]]` and
+    `resume_url`, the session's page here (None without `hub_mode.public_url`). A stale
+    machine's sessions are what it last sent, not what is happening: `open_url` is None,
+    `busy` False and `status` `unknown`; `remote_url` is kept."""
+    stale = {state.name: state.stale for state in store.machines()}
+    urls = {machine.name: machine.url for machine in config.machines}
+    public = config.hub_mode.public_url
+    rows: list[HubSession] = []
+    for row in store.sessions():
+        resume = (
+            f"{public}/machines/{quote(row.machine, safe='')}/sessions/"
+            f"{quote(row.session_id, safe='')}"
+            if public is not None
+            else None
+        )
+        row = replace(row, machine_url=urls.get(row.machine), resume_url=resume)
+        if stale.get(row.machine, True):
+            row = replace(row, stale=True, open_url=None, busy=False, status="unknown")
+        rows.append(row)
+    return newest_first(rows)
+
+
+def find_hub_session(
+    rows: Sequence[HubSession], ident: str, machine: str | None = None
+) -> HubSession | None:
+    """The session `ident` names among `rows` (of `machine` only, when given): an exact id, else
+    a unique id prefix, else the newest session with exactly that title, as
+    `vigil.index.queries.get_session` finds one. None when nothing matches or the id or prefix
+    is ambiguous (the same id on two machines, say)."""
+    ident = ident.strip()
+    if not ident:
+        return None
+    pool = [row for row in rows if machine is None or row.machine == machine]
+    exact = [row for row in pool if row.session_id == ident]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    prefixed = [row for row in pool if row.session_id.startswith(ident)]
+    if prefixed:
+        return prefixed[0] if len(prefixed) == 1 else None
+    titled = newest_first(row for row in pool if row.title == ident)
+    return titled[0] if titled else None
+
+
+def hub_projects(rows: Sequence[HubSession]) -> list[ProjectRow]:
+    """The projects of `rows` with their session counts and latest activity, newest activity
+    first, as `vigil.index.queries.list_projects` lists them."""
+    grouped: dict[str, list[HubSession]] = {}
+    for row in rows:
+        grouped.setdefault(row.project_key, []).append(row)
+    projects: list[ProjectRow] = []
+    for key, items in grouped.items():
+        times = [row.last_activity_at for row in items if row.last_activity_at is not None]
+        projects.append(
+            ProjectRow(
+                project_key=key,
+                label=max(row.project_label for row in items),
+                session_count=len(items),
+                last_activity_at=max(times) if times else None,
+            )
+        )
+    projects.sort(
+        key=lambda p: (
+            p.last_activity_at is None,
+            -p.last_activity_at.timestamp() if p.last_activity_at is not None else 0.0,
+            p.project_key,
+        )
+    )
+    return projects

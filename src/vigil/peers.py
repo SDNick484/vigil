@@ -105,8 +105,6 @@ class PeerSession(SessionRow):
     """A session on a peer. `machine` is the peer's configured name."""
 
     peer: str = ""
-    stale: bool = False
-    """The peer could not be reached; this is its last-known state."""
 
 
 @dataclass(frozen=True)
@@ -849,30 +847,35 @@ def _matches(row: SessionRow, words: list[str]) -> bool:
     return all(word in text for word in words)
 
 
-def filter_sessions(
-    rows: Sequence[PeerSession],
+def filter_sessions[R: SessionRow](
+    rows: Sequence[R],
     *,
     query: str | None = None,
     project_key: str | None = None,
+    since: datetime | None = None,
     include_archived: bool = False,
     collapse_chains: bool = True,
-) -> list[PeerSession]:
-    """A peer's sessions (newest first) filtered as `vigil.index.queries.list_sessions` filters
-    the index: every word of `query` in the title, label, note, first prompt or folder
-    (case-insensitive), `project_key`, archived ones only with `include_archived`, and with
-    `collapse_chains` one per chain that has a match: its newest visible session."""
+) -> list[R]:
+    """Sessions (newest first) filtered as `vigil.index.queries.list_sessions` filters the index:
+    every word of `query` in the title, label, note, first prompt or folder (case-insensitive),
+    `project_key`, activity at or after `since`, archived ones only with `include_archived`, and
+    with `collapse_chains` one per chain that has a match: its newest visible session."""
     words = [word.lower() for word in (query or "").split()]
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
     visible = [row for row in rows if include_archived or not row.archived]
     hits = [
         row
         for row in visible
-        if _matches(row, words) and (project_key is None or row.project_key == project_key)
+        if _matches(row, words)
+        and (project_key is None or row.project_key == project_key)
+        and (since is None or (row.last_activity_at is not None and row.last_activity_at >= since))
     ]
     if not collapse_chains:
         return hits
     chains = {row.chain_id for row in hits}
     seen: set[str] = set()
-    result: list[PeerSession] = []
+    result: list[R] = []
     for row in visible:
         if row.chain_id in chains and row.chain_id not in seen:
             seen.add(row.chain_id)
