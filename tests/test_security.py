@@ -9,9 +9,12 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import VigilEnv
 from vigil import cli
+from vigil.config import ServerConfig
+from vigil.web.auth import FULL, Grant
 from vigil.web.security import (
     BindRefused,
     LoopbackGuard,
+    authorize,
     check_bind_address,
     host_name,
     is_loopback_host,
@@ -130,10 +133,10 @@ def test_host_rebinding_rejected_without_a_host_header() -> None:
 
 
 def test_check_bind_address() -> None:
-    check_bind_address("127.0.0.1")
+    check_bind_address("127.0.0.1", ServerConfig())
     for host in ("0.0.0.0", "::", "192.0.2.1", "localhost", "::1"):
         with pytest.raises(BindRefused, match="127.0.0.1 only"):
-            check_bind_address(host)
+            check_bind_address(host, ServerConfig())
 
 
 def test_serve_refuses_non_loopback(
@@ -156,3 +159,58 @@ def test_serve_binds_loopback_on_the_configured_port(
     assert cli.main(["serve", "--port", "9000"]) == 0
     expected = [("127.0.0.1", 7787), ("127.0.0.1", 9000)]
     assert [(run["host"], run["port"]) for run in runs] == expected
+
+
+READ = Grant("read")
+PUSH_LAPTOP = Grant("push", "laptop")
+
+
+@pytest.mark.parametrize(
+    ("grant", "method", "path", "expected"),
+    [
+        (READ, "GET", "/api/v1/sessions", None),
+        (READ, "HEAD", "/api/v1/health", None),
+        (READ, "GET", "/api/v1/sessions/x/reviews", None),
+        (READ, "GET", "/", "needs scope full"),
+        (READ, "GET", "/api/v10/sessions", "needs scope full"),
+        (READ, "GET", "/peers/x/api/v1/sessions/x/reviews", "needs scope full"),
+        (READ, "POST", "/sessions/x/meta", "needs scope full"),
+        (READ, "POST", "/api/v1/sessions", "needs scope full"),
+        (READ, "GET", "/static/vigil.css", "needs scope full"),
+        (READ, "PUT", "/ingest/laptop/sessions", "needs scope push for laptop"),
+        (PUSH_LAPTOP, "PUT", "/ingest/laptop/sessions", None),
+        (PUSH_LAPTOP, "POST", "/ingest/laptop/heartbeat", None),
+        (PUSH_LAPTOP, "POST", "/ingest/desk/heartbeat", "needs scope push for desk"),
+        (PUSH_LAPTOP, "PUT", "/ingest/desk/sessions", "needs scope push for desk"),
+        (Grant("push", "desk"), "PUT", "/ingest/laptop/sessions", "needs scope push for laptop"),
+        (PUSH_LAPTOP, "POST", "/ingest/laptop/sessions", "needs scope push for laptop"),
+        (PUSH_LAPTOP, "GET", "/ingest/laptop/sessions", "needs scope push for laptop"),
+        (PUSH_LAPTOP, "DELETE", "/ingest/laptop", "needs scope push for laptop"),
+        (PUSH_LAPTOP, "GET", "/api/v1/sessions", "needs scope read"),
+        (PUSH_LAPTOP, "HEAD", "/api/v1/health", "needs scope read"),
+        (PUSH_LAPTOP, "POST", "/api/v1/sessions", "needs scope full"),
+        (PUSH_LAPTOP, "GET", "/", "needs scope full"),
+        (PUSH_LAPTOP, "POST", "/sessions/x/resume", "needs scope full"),
+        (FULL, "PUT", "/ingest/laptop/sessions", "needs scope push for laptop"),
+        (FULL, "POST", "/ingest/laptop/heartbeat", "needs scope push for laptop"),
+        (FULL, "GET", "/ingest", None),
+        (FULL, "POST", "/sessions/x/resume", None),
+        (FULL, "GET", "/api/v1/sessions", None),
+        (FULL, "GET", "/", None),
+    ],
+)
+def test_authorize_table(grant: Grant, method: str, path: str, expected: str | None) -> None:
+    refusal = authorize(grant, method, path)
+    if expected is None:
+        assert refusal is None
+    else:
+        assert refusal is not None
+        assert (refusal.status, refusal.reason) == (403, expected)
+
+
+def test_local_requests_are_full_but_not_ingest() -> None:
+    client = TestClient(guarded_app(), base_url="http://127.0.0.1:7787")
+    assert client.get("/thing").status_code == 200
+    response = client.put("/ingest/laptop/sessions", headers={"Origin": "http://127.0.0.1:7787"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "needs scope push for laptop"}

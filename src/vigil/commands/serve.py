@@ -1,5 +1,6 @@
 """`vigil serve [--port N] [--host ADDRESS]`: run the web UI and JSON API, on 127.0.0.1 unless
-remote access is configured (`server.bind` and `server.token_file`; see `vigil.web.security`)."""
+remote access is configured (`server.bind` with `server.token_file` or `[[server.tokens]]`; see
+`vigil.web.security`)."""
 
 import argparse
 import dataclasses
@@ -27,7 +28,7 @@ class ServeCommand:
             "--host",
             metavar="ADDRESS",
             help="IP address to listen on (default: config `server.bind`, 127.0.0.1); any "
-            "other than 127.0.0.1 needs `server.token_file`",
+            "other than 127.0.0.1 needs remote access (`server.token_file` or `[[server.tokens]]`)",
         )
 
     def run(self, args: argparse.Namespace, config: Config) -> int:
@@ -41,7 +42,7 @@ class ServeCommand:
 
         host = args.host if args.host is not None else config.server.bind
         try:
-            check_bind_address(host, config.server.token_file)
+            check_bind_address(host, config.server)
             config = dataclasses.replace(
                 config, server=dataclasses.replace(config.server, bind=host)
             )

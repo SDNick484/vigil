@@ -1,7 +1,10 @@
 """Remote access (v2): token and cookie auth, the server config, and that loopback is unchanged."""
 
+import base64
+import hashlib
 import hmac
 import os
+import re
 import sqlite3
 import stat
 import time
@@ -13,27 +16,31 @@ from typing import Any
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 
 from tests.conftest import LOOPBACK_URL, VigilEnv
 from vigil import cli
-from vigil.config import ConfigError, ServerConfig, load_config
+from vigil.config import ConfigError, ServerConfig, TokenConfig, load_config
 from vigil.index.db import connect
 from vigil.index.scanner import scan
 from vigil.paths import data_dir
 from vigil.resume import TERMINAL_ALLOWED
 from vigil.web.app import create_app
 from vigil.web.auth import (
+    FULL,
     SESSION_COOKIE,
     AuthError,
     AuthSettings,
+    Credential,
+    Grant,
     load_auth,
     load_signing_key,
     load_token,
     safe_next,
     token_matches,
 )
-from vigil.web.security import BindRefused, check_bind_address
+from vigil.web.security import BindRefused, authorize, check_bind_address
 
 TOKEN = "test-token-" + "0123456789abcdef" * 2  # a placeholder, not a real secret
 REMOTE_HOST = "vigil.example"
@@ -107,6 +114,10 @@ def label(env: VigilEnv) -> object:
     return row[0] if row else None
 
 
+def full_settings(token: str, key: bytes) -> AuthSettings:
+    return AuthSettings(credentials=(Credential(token, FULL),), signing_key=key)
+
+
 def log_in(client: TestClient, origin: str = REMOTE_URL) -> Any:
     return client.post("/login", data={"token": TOKEN, "next": "/"}, headers={"Origin": origin})
 
@@ -175,14 +186,14 @@ def test_token_file_must_be_regular(tmp_path: Path) -> None:
 
 
 def test_check_bind_address_with_token(tmp_path: Path) -> None:
-    token = write_token(tmp_path / "token")
-    check_bind_address("127.0.0.1")
+    server = ServerConfig(token_file=write_token(tmp_path / "token"))
+    check_bind_address("127.0.0.1", ServerConfig())
     for host in ("0.0.0.0", "::", "192.0.2.1", "::1", "fd00::1"):
-        check_bind_address(host, token)
+        check_bind_address(host, server)
     with pytest.raises(BindRefused, match="not an IP address"):
-        check_bind_address("vigil.example", token)
+        check_bind_address("vigil.example", server)
     with pytest.raises(BindRefused, match="127.0.0.1 only"):
-        check_bind_address("0.0.0.0", None)
+        check_bind_address("0.0.0.0", ServerConfig())
 
 
 def test_server_config(tmp_path: Path) -> None:
@@ -336,7 +347,7 @@ def test_login_sets_cookie_and_pages_work(vigil_env: VigilEnv, client_for: Clien
     cookie = response.headers["set-cookie"]
     assert cookie.startswith(f"{SESSION_COOKIE}=")
     attributes = {part.strip().lower() for part in cookie.split(";")[1:]}
-    assert {"httponly", "samesite=strict", "path=/"} <= attributes
+    assert {"httponly", "samesite=lax", "path=/"} <= attributes
     assert "secure" not in attributes  # plain http
     assert any(a.startswith("max-age=") for a in attributes)
 
@@ -422,14 +433,14 @@ def test_forged_or_expired_cookie_rejected(client_for: ClientFactory, tmp_path: 
     client.cookies.set(SESSION_COOKIE, cookie)
     assert client.get("/api/v1/health").status_code == 200
 
-    settings = AuthSettings(token=TOKEN, signing_key=b"k" * 32)
+    settings = full_settings(TOKEN, b"k" * 32)
     now = time.time()
     value = settings.issue_cookie(now)
     assert settings.cookie_ok(value, now)
     assert not settings.cookie_ok(value, now + settings.max_age + 1)  # expired
     # Another key, or another token, voids it.
-    assert not AuthSettings(token=TOKEN, signing_key=b"j" * 32).cookie_ok(value, now)
-    assert not AuthSettings(token=TOKEN + "x", signing_key=b"k" * 32).cookie_ok(value, now)
+    assert not full_settings(TOKEN, b"j" * 32).cookie_ok(value, now)
+    assert not full_settings(TOKEN + "x", b"k" * 32).cookie_ok(value, now)
 
 
 def test_bad_token_rejected_constant_time(
@@ -555,3 +566,281 @@ def test_loopback_still_works_without_token(
     # The DNS rebinding defence still holds for loopback.
     local = client_for(peer=LOCAL_PEER, base_url=LOOPBACK_URL)
     assert local.get("/api/v1/health", headers={"Host": "evil.example"}).status_code == 400
+
+
+# --- scoped tokens ------------------------------------------------------------------------------
+
+
+def test_check_bind_address_with_scoped_tokens(tmp_path: Path) -> None:
+    read = write_token(tmp_path / "read", token="read-" + TOKEN)
+    check_bind_address("192.0.2.5", ServerConfig(tokens=(TokenConfig(read, "read"),)))
+    loose = write_token(tmp_path / "loose", token="loose-" + TOKEN, mode=0o644)
+    with pytest.raises(BindRefused, match="0644; it must be 0600"):
+        check_bind_address(
+            "192.0.2.5",
+            ServerConfig(tokens=(TokenConfig(read, "read"), TokenConfig(loose, "full"))),
+        )
+    with pytest.raises(BindRefused, match="127.0.0.1 only"):
+        check_bind_address("192.0.2.5", ServerConfig())
+
+
+READ_TOKEN = "read-token-" + "0123456789abcdef" * 2  # placeholders, not real secrets
+PUSH_TOKEN = "push-token-" + "0123456789abcdef" * 2
+DESK_TOKEN = "desk-token-" + "0123456789abcdef" * 2
+
+
+@pytest.fixture
+def scoped_app(vigil_env: VigilEnv, tmp_path: Path, token_file: Path) -> FastAPI:
+    """The service with a full `token_file`, a read token and push tokens for `laptop` and
+    `desk`, `REMOTE_HOST` allowed."""
+    read = write_token(tmp_path / "read", READ_TOKEN)
+    push = write_token(tmp_path / "push", PUSH_TOKEN)
+    desk = write_token(tmp_path / "desk", DESK_TOKEN)
+    write_config(
+        vigil_env,
+        f'token_file = "{token_file}"\nallowed_hosts = ["{REMOTE_HOST}"]\n\n'
+        f'[[server.tokens]]\nfile = "{read}"\nscope = "read"\n\n'
+        f'[[server.tokens]]\nfile = "{push}"\nscope = "push"\nmachine = "laptop"\n\n'
+        f'[[server.tokens]]\nfile = "{desk}"\nscope = "push"\nmachine = "desk"',
+    )
+    conn = connect(vigil_env.index)
+    scan(conn, vigil_env.claude_home)
+    conn.close()
+    return create_app(
+        load_config(), conn_factory=lambda: connect(vigil_env.index), start_watcher=False
+    )
+
+
+def test_scope_matrix(scoped_app: FastAPI) -> None:
+    """Every route of the app, from every kind of caller: the guard refuses exactly what
+    `authorize` refuses, with the scope needed, and lets the rest reach the route."""
+    remote = TestClient(scoped_app, base_url=REMOTE_URL, client=REMOTE_PEER)
+    local = TestClient(scoped_app, base_url=LOOPBACK_URL, client=LOCAL_PEER)
+    callers: dict[str, tuple[TestClient, Grant | None, dict[str, str]]] = {
+        "none": (remote, None, {"Origin": REMOTE_URL}),
+        "read": (remote, Grant("read"), bearer(READ_TOKEN)),
+        "push laptop": (remote, Grant("push", "laptop"), bearer(PUSH_TOKEN)),
+        "push desk": (remote, Grant("push", "desk"), bearer(DESK_TOKEN)),
+        "full": (remote, FULL, bearer(TOKEN)),
+        "local": (local, FULL, {"Origin": LOOPBACK_URL}),
+    }
+    # Every route, the included routers' and FastAPI's own (/docs, /openapi.json) alike. A
+    # route without methods (a WebSocket route, a mount) would need its own rows here.
+    routes = list(iter_route_contexts(scoped_app.routes))
+    assert len(routes) > 30
+    assert any(route.path == "/sessions/{session_id}/resume" for route in routes)
+    verdicts: set[bool] = set()
+    checked = 0
+    for route in routes:
+        assert route.path is not None and route.methods is not None, route
+        path = re.sub(r"\{[^}]*\}", "x", route.path)
+        for method in sorted({*route.methods, *(["HEAD"] if "GET" in route.methods else [])}):
+            for who, (client, grant, headers) in callers.items():
+                response = client.request(method, path, headers=headers, follow_redirects=False)
+                where = f"{who} {method} {path}"
+                # The guard's 401 asks for a token; a route's own 401 (a wrong token posted to
+                # /login) does not. No route answers 403 itself.
+                passed = response.status_code != 403 and "www-authenticate" not in response.headers
+                if grant is None:
+                    public = path in ("/login", "/logout") or path.startswith("/static/")
+                    if public:
+                        assert passed, where
+                    else:
+                        assert response.status_code == 401, where
+                        assert "www-authenticate" in response.headers, where
+                    continue
+                refusal = authorize(grant, method, path)
+                verdicts.add(refusal is None)
+                if refusal is None:
+                    assert passed, where
+                else:
+                    assert response.status_code == 403, where
+                    if method != "HEAD":
+                        assert response.json() == {"detail": refusal.reason}, where
+                    assert refusal.reason.startswith("needs scope "), where
+                checked += 1
+    assert checked > 150
+    assert verdicts == {True, False}
+
+
+def test_read_token_cannot_log_in(client_for_scoped: ClientFactory) -> None:
+    client = client_for_scoped()
+    response = client.post(
+        "/login", data={"token": READ_TOKEN, "next": "/"}, headers={"Origin": REMOTE_URL}
+    )
+    assert response.status_code == 401
+    assert "not the token" in response.text
+    assert "set-cookie" not in response.headers
+    response = client.post(
+        "/login", data={"token": PUSH_TOKEN, "next": "/"}, headers={"Origin": REMOTE_URL}
+    )
+    assert response.status_code == 401
+    assert log_in(client).status_code == 303
+    # The cookie is full access.
+    assert client.get("/", headers=BROWSER).status_code == 200
+
+
+def test_scoped_bearers(vigil_env: VigilEnv, client_for_scoped: ClientFactory) -> None:
+    client = client_for_scoped()
+    assert client.get("/api/v1/sessions", headers=bearer(READ_TOKEN)).status_code == 200
+    response = client.get("/", headers={**BROWSER, **bearer(READ_TOKEN)})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "needs scope full"}
+    response = client.post(
+        f"/sessions/{NAMED}/meta", data={"label": "read"}, headers=bearer(READ_TOKEN)
+    )
+    assert response.status_code == 403
+    response = client.post(
+        f"/sessions/{NAMED}/meta", data={"label": "push"}, headers=bearer(PUSH_TOKEN)
+    )
+    assert response.status_code == 403
+    assert label(vigil_env) is None
+    response = client.get("/api/v1/sessions", headers=bearer(PUSH_TOKEN))
+    assert response.status_code == 403
+    assert response.json() == {"detail": "needs scope read"}
+    response = client.post(f"/sessions/{NAMED}/meta", data={"label": "full"}, headers=bearer())
+    assert response.status_code == 200
+    assert label(vigil_env) == "full"
+
+
+def test_bearer_compares_every_credential(
+    client_for_scoped: ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compared: list[tuple[bytes, bytes]] = []
+    real = hmac.compare_digest
+
+    def spy(a: Any, b: Any) -> bool:
+        compared.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(hmac, "compare_digest", spy)
+    client = client_for_scoped()
+    # Four credentials: each is compared, whether the token matches the first, the last or none.
+    for token in (TOKEN, DESK_TOKEN, "x" * len(TOKEN)):
+        compared.clear()
+        client.get("/api/v1/health", headers=bearer(token))
+        assert len(compared) == 4, token
+        assert all(len(a) == len(b) == 32 for a, b in compared)
+
+
+@pytest.fixture
+def client_for_scoped(scoped_app: FastAPI) -> Iterator[ClientFactory]:
+    clients: list[TestClient] = []
+
+    def make(peer: tuple[str, int] = REMOTE_PEER, base_url: str = REMOTE_URL) -> TestClient:
+        client = TestClient(scoped_app, base_url=base_url, client=peer, follow_redirects=False)
+        client.__enter__()
+        clients.append(client)
+        return client
+
+    yield make
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+def test_duplicate_tokens_refused(vigil_env: VigilEnv, tmp_path: Path, token_file: Path) -> None:
+    again = write_token(tmp_path / "again")
+    write_config(
+        vigil_env,
+        f'token_file = "{token_file}"\n\n[[server.tokens]]\nfile = "{again}"\nscope = "read"',
+    )
+    with pytest.raises(AuthError, match=re.escape("server.tokens[1] holds the same token as")):
+        create_app(load_config(), start_watcher=False)
+    read = write_token(tmp_path / "read", READ_TOKEN)
+    write_config(
+        vigil_env,
+        f'[[server.tokens]]\nfile = "{read}"\nscope = "read"\n\n'
+        f'[[server.tokens]]\nfile = "{again}"\nscope = "full"\n\n'
+        f'[[server.tokens]]\nfile = "{read}"\nscope = "push"\nmachine = "laptop"',
+    )
+    with pytest.raises(AuthError, match=re.escape("server.tokens[3] holds the same token as")):
+        create_app(load_config(), start_watcher=False)
+
+
+def test_existing_cookie_survives_upgrade(tmp_path: Path, token_file: Path) -> None:
+    """A cookie signed the way vigil signed it before scopes (over the one token's digest) is
+    still valid, also once other tokens are configured."""
+    key = load_signing_key(tmp_path / "session.key")
+    expires = int(time.time()) + 3600
+    message = b"|".join(
+        (b"vigil-session-v1", str(expires).encode(), hashlib.sha256(TOKEN.encode()).digest())
+    )
+    mac = base64.urlsafe_b64encode(hmac.new(key, message, hashlib.sha256).digest()).rstrip(b"=")
+    cookie = f"{expires}.{mac.decode()}"
+    read = write_token(tmp_path / "read", READ_TOKEN)
+    for server in (
+        ServerConfig(token_file=token_file),
+        ServerConfig(token_file=token_file, tokens=(TokenConfig(read, "read"),)),
+    ):
+        auth = load_auth(server, tmp_path)
+        assert auth is not None
+        assert auth.cookie_ok(cookie, time.time())
+    # With two full tokens the cookie is signed over both, so adding one logs browsers out.
+    other = write_token(tmp_path / "other", DESK_TOKEN)
+    auth = load_auth(
+        ServerConfig(token_file=token_file, tokens=(TokenConfig(other, "full"),)), tmp_path
+    )
+    assert auth is not None
+    assert not auth.cookie_ok(cookie, time.time())
+    assert auth.cookie_ok(auth.issue_cookie(time.time()), time.time())
+
+
+def test_no_full_token_no_login(vigil_env: VigilEnv, tmp_path: Path) -> None:
+    read = write_token(tmp_path / "read", READ_TOKEN)
+    write_config(
+        vigil_env,
+        f'allowed_hosts = ["{REMOTE_HOST}"]\n\n[[server.tokens]]\nfile = "{read}"\nscope = "read"',
+    )
+    app = create_app(load_config(), start_watcher=False)
+    client = TestClient(app, base_url=REMOTE_URL, client=REMOTE_PEER, follow_redirects=False)
+    detail = {"detail": "no vigil login here: sign in through Cloudflare Access"}
+    response = client.get("/login")
+    assert (response.status_code, response.json()) == (404, detail)
+    response = client.post("/login", data={"token": READ_TOKEN}, headers={"Origin": REMOTE_URL})
+    assert (response.status_code, response.json()) == (404, detail)
+    # A browser is not sent to a login page that is not there.
+    assert client.get("/", headers=BROWSER).status_code == 401
+    assert client.get("/api/v1/health", headers=bearer(READ_TOKEN)).status_code == 200
+    # No cookie is ever good without a full token.
+    auth = app.state.vigil_auth
+    assert not auth.can_log_in
+    assert not auth.cookie_ok(auth.issue_cookie(time.time()), time.time())
+
+
+def test_credential_repr_hides_token() -> None:
+    credential = Credential(TOKEN, Grant("read"))
+    assert TOKEN not in repr(credential)
+    assert TOKEN not in repr(AuthSettings(credentials=(credential,), signing_key=b"k" * 32))
+
+
+# --- the login cookie -------------------------------------------------------------------------
+
+
+def test_cookie_is_samesite_lax(client_for: ClientFactory) -> None:
+    client = client_for()
+    response = log_in(client)
+    assert response.status_code == 303
+    assert "samesite=lax" in response.headers["set-cookie"].lower()
+    response = client.post("/logout", headers={"Origin": REMOTE_URL})
+    assert "samesite=lax" in response.headers["set-cookie"].lower()
+
+
+def test_cross_site_post_with_cookie_refused(
+    vigil_env: VigilEnv, client_for: ClientFactory
+) -> None:
+    """Lax sends the cookie on a top-level navigation from another site; a POST from there is
+    still refused for its Origin."""
+    client = client_for()
+    log_in(client)
+    response = client.post(
+        f"/sessions/{NAMED}/meta",
+        data={"label": "cross-site"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert response.status_code == 403
+    assert label(vigil_env) is None
+    # A link from another site opens pages signed in.
+    assert (
+        client.get("/", headers={**BROWSER, "Referer": "https://hub.example.com/"}).status_code
+        == 200
+    )

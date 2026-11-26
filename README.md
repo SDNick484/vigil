@@ -283,9 +283,13 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |
 | `review.max_budget_usd` | `3.0` | Most a [session review](#session-reviews) may spend, in USD, 0.05 to 50 (`claude --max-budget-usd`). Claude Code checks it after each turn, so a review can go a little over. A review typically costs about $0.20 to $1 with Sonnet; Claude Code's own system prompt is most of that. |
 | `review.model` | `"sonnet"` | Model for session reviews (`claude --model`); `""` uses Claude Code's default. Same rule as `--model` in `resume.default_flags`. |
-| `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs `server.token_file`; see [Remote access](#remote-access). |
+| `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs remote access (`server.token_file` or `server.tokens`); see [Remote access](#remote-access). |
 | `server.token_file` | unset | File holding the access token, which turns remote access on. Must be an absolute path (a leading `~` is expanded) to a file you own with mode 0600 (0400 is fine too). |
-| `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs `server.token_file`. |
+| `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs remote access (`server.token_file` or `server.tokens`). |
+| `server.tokens` | `[]` | More access tokens, each with a scope, as `[[server.tokens]]` tables; any of them turns remote access on. See Scopes under [Remote access](#remote-access). |
+| `server.tokens[].file` | required | File holding the token. Same rules as `server.token_file`. |
+| `server.tokens[].scope` | required | What the token may do: `"read"`, `"push"` or `"full"`. |
+| `server.tokens[].machine` | unset | The one machine a `"push"` token may push for (required for `"push"`, not allowed otherwise): 1 to 63 letters, digits, `-` and `_`. |
 | `machine` | host name | What the machine column calls this machine when [peers](#peers) are listed. 1 to 63 printable characters. |
 | `peers` | `[]` | Other machines' vigil services whose sessions this one lists, as `[[peers]]` tables; see [Peers](#peers). |
 | `peers[].name` | required | The peer's name in the machine column and in URLs: 1 to 63 letters, digits, `-` and `_`. Unique, and not the same as `machine`. |
@@ -542,11 +546,35 @@ keeps the DNS rebinding defence.
 
     curl -H "Authorization: Bearer $(cat ~/.config/vigil/token)" http://100.64.0.1:7787/api/v1/sessions
 
+**Scopes.** The token in `server.token_file` can do everything. For a tool that should do less,
+such as a dashboard that only reads, or a machine pushing its sessions to a hub, add more tokens,
+each in its own file and each with a scope:
+
+| Scope | Allows |
+| --- | --- |
+| `read` | `GET` and `HEAD` on `/api/v1/*` only. |
+| `push` | `PUT /ingest/{name}/sessions` and `POST /ingest/{name}/heartbeat` for its bound `name` only. |
+| `full` | Everything vigil's own pages can do (and, on a hub, browsing its pages). Not ingest. |
+
+    [[server.tokens]]
+    file = "~/.config/vigil/dashboard.token"
+    scope = "read"
+
+    [[server.tokens]]
+    file = "~/.config/vigil/laptop-push.token"
+    scope = "push"
+    machine = "laptop"
+
+Any of them turns remote access on, as `server.token_file` does; each file follows the same rules,
+and two entries holding the same token stop vigil with an error. A request its token does not
+cover gets 403 naming the scope it needs. Only a `full` token logs a browser in. Local requests
+need no token and can do everything but ingest.
+
 **Browsers** are sent to `/login`, where you paste the token once. vigil then sets a session
-cookie (`vigil_session`) that lasts 30 days: HttpOnly, SameSite=Strict, and Secure when the page
-came over HTTPS. Because it is SameSite=Strict, following a link to vigil from another site shows
-the login page; open vigil directly instead. A POST made with the cookie must still carry this
-service's own `Origin`, as vigil's pages do. **Log out** in the header clears the cookie. The
+cookie (`vigil_session`) that lasts 30 days: HttpOnly, SameSite=Lax, and Secure when the page
+came over HTTPS, so following a link to vigil from another site (a hub, say) opens it signed in.
+A POST made with the cookie must still carry this service's own `Origin`, as vigil's pages do, so
+another site cannot act with it. **Log out** in the header clears the cookie. The
 cookie is signed with a random key that vigil creates in its data folder
 (`$XDG_DATA_HOME/vigil/session.key`, mode 0600); delete it, or change the token, to log every
 browser out.

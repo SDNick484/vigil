@@ -1,8 +1,17 @@
+import re
 from pathlib import Path
 
 import pytest
 
-from vigil.config import Config, ConfigError, ReviewConfig, load_config
+from vigil.config import (
+    MACHINE_NAME,
+    Config,
+    ConfigError,
+    ReviewConfig,
+    TokenConfig,
+    check_machine_name,
+    load_config,
+)
 from vigil.paths import config_path, data_dir, index_path
 
 
@@ -173,3 +182,66 @@ def test_review_config(tmp_path: Path) -> None:
         load_config(write(tmp_path, "[review]\nmodel = 5\n"))
     with pytest.raises(ConfigError, match="unknown config key: review.tools"):
         load_config(write(tmp_path, "[review]\ntools = 1\n"))
+
+
+def test_server_tokens_parsed(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        '[[server.tokens]]\nfile = "/tmp/r"\nscope = "read"\n\n'
+        '[[server.tokens]]\nfile = "/tmp/p"\nscope = "push"\nmachine = "laptop"\n',
+    )
+    server = load_config(path).server
+    assert server.tokens == (
+        TokenConfig(file=Path("/tmp/r"), scope="read"),
+        TokenConfig(file=Path("/tmp/p"), scope="push", machine="laptop"),
+    )
+    assert server.token_file is None
+    assert server.remote_enabled
+    assert not load_config(write(tmp_path, "")).server.remote_enabled
+
+
+@pytest.mark.parametrize(
+    ("entry", "where"),
+    [
+        ('file = "/tmp/t"\nscope = "admin"', "server.tokens[1].scope"),
+        ('file = "/tmp/t"\nscope = "push"', "server.tokens[1].machine"),
+        ('file = "/tmp/t"\nscope = "read"\nmachine = "laptop"', "server.tokens[1].machine"),
+        ('file = "/tmp/t"\nscope = "full"\nmachine = "laptop"', "server.tokens[1].machine"),
+        ('file = "/tmp/t"\nscope = "push"\nmachine = "bad name"', "server.tokens[1].machine"),
+        ('file = "relative/t"\nscope = "read"', "server.tokens[1].file"),
+        ('scope = "read"', "server.tokens[1].file"),
+        ('file = "/tmp/t"', "server.tokens[1].scope"),
+        ('file = "/tmp/t"\nscope = "read"\nname = "x"', "server.tokens[1].name"),
+        (
+            'file = "/tmp/t"\nscope = "read"\n\n[[server.tokens]]\nfile = "/tmp/u"\nscope = 3',
+            "server.tokens[2].scope",
+        ),
+    ],
+)
+def test_server_tokens_refused(tmp_path: Path, entry: str, where: str) -> None:
+    with pytest.raises(ConfigError, match=re.escape(where)):
+        load_config(write(tmp_path, f"[[server.tokens]]\n{entry}\n"))
+
+
+def test_server_tokens_must_be_tables(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=re.escape("server.tokens")):
+        load_config(write(tmp_path, '[server]\ntokens = ["/tmp/t"]\n'))
+
+
+def test_allowed_hosts_with_tokens_only(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        '[server]\nallowed_hosts = ["hub.example.com"]\n\n'
+        '[[server.tokens]]\nfile = "/tmp/r"\nscope = "read"\n',
+    )
+    assert load_config(path).server.allowed_hosts == ("hub.example.com",)
+    with pytest.raises(ConfigError, match=re.escape("needs remote access")):
+        load_config(write(tmp_path, '[server]\nallowed_hosts = ["hub.example.com"]\n'))
+
+
+def test_machine_name_check() -> None:
+    assert check_machine_name("laptop-2_b", "x") == "laptop-2_b"
+    assert MACHINE_NAME.fullmatch("desk")
+    for value in ("bad name", "-lead", "", "a" * 64, 3, None):
+        with pytest.raises(ConfigError, match="`where` must be 1 to 63 letters"):
+            check_machine_name(value, "where")

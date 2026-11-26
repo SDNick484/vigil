@@ -1,17 +1,26 @@
-"""Remote access (v2): the access token, the browser session cookie, and the login page (`router`).
+"""Remote access (v2): the access tokens, the browser session cookie, and the login page
+(`router`).
 
-Remote access is on only when `server.token_file` is set. Then:
+Remote access is on only when `server.token_file` or `[[server.tokens]]` is set
+(`ServerConfig.remote_enabled`). Every token is a `Credential` with a `Grant`: a scope (`read`,
+`push` for one machine, or `full`; `server.token_file` is `full`). Then:
 
-- API clients send the token in every request: `Authorization: Bearer <token>`.
-- Browsers post the token once to `/login` and get a session cookie (`vigil_session`): HttpOnly,
-  SameSite=Strict, Path=/, Secure when the page was loaded over HTTPS, valid for 30 days. Its value
-  is an expiry time and an HMAC-SHA256 over that time and a digest of the token, keyed with a
-  random key kept in the data dir (`session.key`, created 0600). Changing the token or deleting
-  the key logs every browser out.
+- API clients send a token in every request: `Authorization: Bearer <token>`. The request may do
+  what the token's grant allows (`vigil.web.security.authorize`).
+- Browsers post a `full` token once to `/login` and get a session cookie (`vigil_session`):
+  HttpOnly, SameSite=Lax, Path=/, Secure when the page was loaded over HTTPS, valid for 30 days,
+  and as good as a `full` token. Lax, so that following a link from another site (a hub's
+  "Resume on <machine>") arrives signed in; every state-changing request is a POST, and the guard
+  refuses a POST made with the cookie unless its `Origin` is this service. Its value is an
+  expiry time and an HMAC-SHA256 over that time and a digest of the `full` token (of all of
+  them, when there are several), keyed with a random key kept in the data dir (`session.key`,
+  created 0600). Changing a `full` token or deleting the key logs every browser out. With no
+  `full` token there is no login page.
 
 Who needs to authenticate, and how a request is checked, is decided in `vigil.web.security`; this
 module only provides the pieces. Tokens and cookies are compared in constant time
-(`hmac.compare_digest`).
+(`hmac.compare_digest`), and a token is compared with every credential, without stopping at the
+first match.
 """
 
 import base64
@@ -30,7 +39,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from vigil.config import ServerConfig
+from vigil.config import AccessScope, ServerConfig
 from vigil.web.pages import templates
 
 SESSION_COOKIE = "vigil_session"
@@ -157,24 +166,74 @@ def _b64(data: bytes) -> str:
 
 
 @dataclass(frozen=True)
+class Grant:
+    """What an admitted request may do: a scope, and for `push` the one machine it pushes for."""
+
+    scope: AccessScope
+    machine: str | None = None
+
+
+FULL = Grant("full")
+"""Everything vigil's own pages can do (not ingest): local requests, the cookie, `full` tokens."""
+
+
+@dataclass(frozen=True)
+class Credential:
+    """A configured access token and what it grants."""
+
+    token: str = field(repr=False)
+    grant: Grant
+
+
+@dataclass(frozen=True)
 class AuthSettings:
     """What the guard needs to check remote requests. Built by `load_auth`."""
 
-    token: str = field(repr=False)
+    credentials: tuple[Credential, ...]
     signing_key: bytes = field(repr=False)
     allowed_hosts: frozenset[str] = frozenset()
     """Host names (as `security.host_name` gives them) remote requests may use, besides the
     loopback names."""
     max_age: int = SESSION_MAX_AGE
 
-    def bearer_ok(self, authorization: str) -> bool:
-        """Whether an `Authorization` header value is `Bearer <the token>`."""
-        scheme, _, credentials = authorization.strip().partition(" ")
-        return scheme.lower() == "bearer" and token_matches(credentials.strip(), self.token)
+    def _match(self, token: str) -> Credential | None:
+        """The credential whose token is `token`. Every credential is compared, in constant
+        time and without stopping at a match, so the timing shows neither which one matched
+        nor whether any did."""
+        found: Credential | None = None
+        for credential in self.credentials:
+            if token_matches(token, credential.token):
+                found = credential
+        return found
+
+    def bearer(self, authorization: str) -> Credential | None:
+        """The credential an `Authorization` header value (`Bearer <token>`) names, if any."""
+        scheme, _, token = authorization.strip().partition(" ")
+        if scheme.lower() != "bearer":
+            return None
+        return self._match(token.strip())
+
+    def login_ok(self, token: str) -> bool:
+        """Whether `token` may log a browser in: it is a `full` token."""
+        credential = self._match(token)
+        return credential is not None and credential.grant.scope == "full"
+
+    @property
+    def can_log_in(self) -> bool:
+        """Whether there is a `full` token to log in with (else no login page and no cookie)."""
+        return any(credential.grant.scope == "full" for credential in self.credentials)
+
+    def _cookie_secret(self) -> bytes:
+        # With one full token this is its digest, as before scopes, so existing cookies stay
+        # valid; with several, a digest of all of them.
+        digests = sorted(_digest(c.token) for c in self.credentials if c.grant.scope == "full")
+        if len(digests) == 1:
+            return digests[0]
+        return hashlib.sha256(b"".join(digests)).digest()
 
     def _mac(self, expires: int) -> str:
-        # The token's digest is part of the signed text, so a new token voids old cookies.
-        message = b"|".join((_COOKIE_CONTEXT, str(expires).encode(), _digest(self.token)))
+        # The full tokens' digest is part of the signed text, so a new token voids old cookies.
+        message = b"|".join((_COOKIE_CONTEXT, str(expires).encode(), self._cookie_secret()))
         return _b64(hmac.new(self.signing_key, message, hashlib.sha256).digest())
 
     def issue_cookie(self, now: float) -> str:
@@ -183,8 +242,9 @@ class AuthSettings:
         return f"{expires}.{self._mac(expires)}"
 
     def cookie_ok(self, value: str | None, now: float) -> bool:
-        """Whether `value` is a session cookie this service issued and that has not expired."""
-        if not value:
+        """Whether `value` is a session cookie this service issued and that has not expired.
+        Never, when there is no `full` token to log in with."""
+        if not value or not self.can_log_in:
             return False
         expires_text, _, mac = value.partition(".")
         if not (expires_text.isascii() and expires_text.isdigit() and len(expires_text) <= 12):
@@ -207,19 +267,37 @@ def _bind_host(bind: str) -> str | None:
     return f"[{address}]" if address.version == 6 else str(address)
 
 
+def _load_credentials(server: ServerConfig) -> tuple[Credential, ...]:
+    """`server.token_file` (full) and every `[[server.tokens]]` entry, read and checked. Raises
+    AuthError when a file cannot be used or two of them hold the same token."""
+    named: list[tuple[str, Credential]] = []
+    if server.token_file is not None:
+        named.append(("server.token_file", Credential(load_token(server.token_file), FULL)))
+    for number, entry in enumerate(server.tokens, start=1):
+        where = f"server.tokens[{number}]"
+        credential = Credential(load_token(entry.file), Grant(entry.scope, entry.machine))
+        for name, other in named:
+            if token_matches(credential.token, other.token):
+                raise AuthError(f"{where} holds the same token as {name}; give each its own token")
+        named.append((where, credential))
+    return tuple(credential for _, credential in named)
+
+
 def load_auth(server: ServerConfig, data_dir: Path) -> AuthSettings | None:
-    """The settings for remote access, or None when `server.token_file` is not set (loopback
-    only, as in v1). Reads the token and the signing key (creating the key in `data_dir`);
-    raises AuthError when either cannot be used. The bind address, unless it is a wildcard, is
-    an allowed host too."""
-    if server.token_file is None:
+    """The settings for remote access, or None when it is not configured
+    (`server.remote_enabled`; loopback only, as in v1). Reads the tokens and the signing key
+    (creating the key in `data_dir`); raises AuthError when one cannot be used, or when two
+    entries hold the same token. The bind address, unless it is a wildcard, is an allowed host
+    too."""
+    if not server.remote_enabled:
         return None
+    credentials = _load_credentials(server)
     hosts = set(server.allowed_hosts)
     bind = _bind_host(server.bind)
     if bind is not None:
         hosts.add(bind)
     return AuthSettings(
-        token=load_token(server.token_file),
+        credentials=credentials,
         signing_key=load_signing_key(data_dir / SIGNING_KEY_FILE),
         allowed_hosts=frozenset(hosts),
     )
@@ -256,7 +334,14 @@ def settings(request: Request) -> AuthSettings | None:
 
 def _off() -> JSONResponse:
     return JSONResponse(
-        {"detail": "remote access is not enabled (server.token_file is not set)"}, status_code=404
+        {"detail": "remote access is not enabled (no server.token_file or [[server.tokens]])"},
+        status_code=404,
+    )
+
+
+def _no_login() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "no vigil login here: sign in through Cloudflare Access"}, status_code=404
     )
 
 
@@ -268,21 +353,27 @@ def _login_page(request: Request, next_path: str, error: str | None, status: int
 @router.get("/login")
 def login_page(request: Request, next_path: Annotated[str, Query(alias="next")] = "/") -> Response:
     """The login form: one field, the token."""
-    if settings(request) is None:
+    auth = settings(request)
+    if auth is None:
         return _off()
+    if not auth.can_log_in:
+        return _no_login()
     response: Response = _login_page(request, safe_next(next_path), None, 200)
     return response
 
 
 @router.post("/login")
 async def login(request: Request) -> Response:
-    """Check the posted `token`; on success set the session cookie and go to `next`."""
+    """Check the posted `token` (a `full` one); on success set the session cookie and go to
+    `next`."""
     auth = settings(request)
     if auth is None:
         return _off()
+    if not auth.can_log_in:
+        return _no_login()
     form = await request.form()
     token, next_path = form.get("token"), safe_next(form.get("next"))
-    if not isinstance(token, str) or not token_matches(token.strip(), auth.token):
+    if not isinstance(token, str) or not auth.login_ok(token.strip()):
         response: Response = _login_page(request, next_path, "That is not the token.", 401)
         return response
     response = RedirectResponse(next_path, status_code=303)
@@ -293,7 +384,7 @@ async def login(request: Request) -> Response:
         path="/",
         secure=is_https(request.url.scheme, request.headers),
         httponly=True,
-        samesite="strict",
+        samesite="lax",
     )
     return response
 
@@ -307,6 +398,6 @@ def logout(request: Request) -> Response:
         path="/",
         secure=is_https(request.url.scheme, request.headers),
         httponly=True,
-        samesite="strict",
+        samesite="lax",
     )
     return response
