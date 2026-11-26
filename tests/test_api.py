@@ -1018,3 +1018,33 @@ def test_local_sessions_have_hub_fields(web_client: TestClient) -> None:
 def test_machines_empty_and_mode_local_on_local_vigil(web_client: TestClient) -> None:
     assert web_client.get("/api/v1/machines").json() == []
     assert web_client.get("/api/v1/health").json()["mode"] == "local"
+
+
+# Live-state timestamp for the push client (vigil hub, Task 17).
+from vigil.web import LIVE_TTL, LiveStatus  # noqa: E402
+
+
+def test_live_status_checked_at_and_peek(vigil_env: VigilEnv, tmp_path: Path) -> None:
+    live = [{"sessionId": NAMED, "kind": "background", "status": "busy"}]
+    install_claude(vigil_env, transcript=tmp_path / "x", link=None, live=live)
+    ticks = [100.0]
+    wall = datetime(2026, 11, 25, 18, 0, tzinfo=UTC)
+    status = LiveStatus(clock=lambda: ticks[0], wall=lambda: wall)
+    assert status.checked_at is None
+    assert status.peek() is None  # nothing cached, and peek never probes
+    assert vigil_env.bin.calls("claude") == []
+
+    caps, sessions = status.get()
+    assert caps.has_agents_json and sessions[NAMED].busy
+    assert status.checked_at == wall
+    calls = len(vigil_env.bin.calls("claude"))
+    ticks[0] += LIVE_TTL * 100  # long past the TTL
+    assert status.peek() == (caps, sessions, wall)
+    assert len(vigil_env.bin.calls("claude")) == calls
+
+    later = wall + timedelta(minutes=5)
+    status = LiveStatus(clock=lambda: ticks[0], wall=lambda: later)
+    assert status.probe() is not None
+    assert status.checked_at == later
+    peeked = status.peek()
+    assert peeked is not None and peeked[2] == later
