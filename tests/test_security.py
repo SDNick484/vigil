@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import VigilEnv
 from vigil import cli
+from vigil.config import ServerConfig
 from vigil.web.security import (
     BindRefused,
     LoopbackGuard,
@@ -130,10 +131,10 @@ def test_host_rebinding_rejected_without_a_host_header() -> None:
 
 
 def test_check_bind_address() -> None:
-    check_bind_address("127.0.0.1")
+    check_bind_address("127.0.0.1", ServerConfig())
     for host in ("0.0.0.0", "::", "192.0.2.1", "localhost", "::1"):
         with pytest.raises(BindRefused, match="127.0.0.1 only"):
-            check_bind_address(host)
+            check_bind_address(host, ServerConfig())
 
 
 def test_serve_refuses_non_loopback(

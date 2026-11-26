@@ -33,7 +33,6 @@ The guard records how a request was let in as `scope["vigil.access"]`: `local`, 
 import ipaddress
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlsplit
 
@@ -42,6 +41,7 @@ from starlette.requests import cookie_parser
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from vigil.config import ServerConfig
 from vigil.resume import TERMINAL_ALLOWED
 from vigil.web.auth import SESSION_COOKIE, AuthError, AuthSettings, load_token
 
@@ -72,25 +72,30 @@ class BindRefused(Exception):
     """The service may not bind to the address asked for."""
 
 
-def check_bind_address(host: str, token_file: Path | None = None) -> None:
+def check_bind_address(host: str, server: ServerConfig) -> None:
     """Raise BindRefused unless vigil may listen on `host`: 127.0.0.1 always; any other IP
-    address only with a `token_file` that `vigil.web.auth.load_token` accepts (it exists, is
-    private to the user, mode 0600, and holds a long enough token)."""
+    address only with remote access configured (`server.remote_enabled`) and every configured
+    token file one that `vigil.web.auth.load_token` accepts (it exists, is private to the user,
+    mode 0600, and holds a long enough token)."""
     if host == BIND_ADDRESS:
         return
-    if token_file is None:
+    if not server.remote_enabled:
         raise BindRefused(
-            f"refusing to listen on {host}: vigil serves on {BIND_ADDRESS} only "
-            "unless server.token_file is set (see Remote access in the README)"
+            f"refusing to listen on {host}: vigil serves on {BIND_ADDRESS} only unless remote "
+            "access is configured (server.token_file or [[server.tokens]]; see Remote access in "
+            "the README)"
         )
     try:
         ipaddress.ip_address(host)
     except ValueError:
         raise BindRefused(f"refusing to listen on {host}: not an IP address") from None
-    try:
-        load_token(token_file)
-    except AuthError as error:
-        raise BindRefused(f"refusing to listen on {host}: {error}") from None
+    files = [server.token_file] if server.token_file is not None else []
+    files += [token.file for token in server.tokens]
+    for path in files:
+        try:
+            load_token(path)
+        except AuthError as error:
+            raise BindRefused(f"refusing to listen on {host}: {error}") from None
 
 
 def host_name(host: str) -> str | None:

@@ -283,9 +283,13 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `usage.claude_aliases` | `[]` | Extra command names to count as `claude`, e.g. `["cl"]`. |
 | `review.max_budget_usd` | `3.0` | Most a [session review](#session-reviews) may spend, in USD, 0.05 to 50 (`claude --max-budget-usd`). Claude Code checks it after each turn, so a review can go a little over. A review typically costs about $0.20 to $1 with Sonnet; Claude Code's own system prompt is most of that. |
 | `review.model` | `"sonnet"` | Model for session reviews (`claude --model`); `""` uses Claude Code's default. Same rule as `--model` in `resume.default_flags`. |
-| `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs `server.token_file`; see [Remote access](#remote-access). |
+| `server.bind` | `"127.0.0.1"` | IP address `vigil serve` listens on (`--host` overrides it). Any other address needs remote access (`server.token_file` or `server.tokens`); see [Remote access](#remote-access). |
 | `server.token_file` | unset | File holding the access token, which turns remote access on. Must be an absolute path (a leading `~` is expanded) to a file you own with mode 0600 (0400 is fine too). |
-| `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs `server.token_file`. |
+| `server.allowed_hosts` | `[]` | Extra host names remote clients may reach vigil by (the `Host` header, without port; IPv6 in brackets), e.g. a Tailscale name. Needs remote access (`server.token_file` or `server.tokens`). |
+| `server.tokens` | `[]` | More access tokens, each with a scope, as `[[server.tokens]]` tables; any of them turns remote access on. See Scopes under [Remote access](#remote-access). |
+| `server.tokens[].file` | required | File holding the token. Same rules as `server.token_file`. |
+| `server.tokens[].scope` | required | What the token may do: `"read"`, `"push"` or `"full"`. |
+| `server.tokens[].machine` | unset | The one machine a `"push"` token may push for (required for `"push"`, not allowed otherwise): 1 to 63 letters, digits, `-` and `_`. |
 | `machine` | host name | What the machine column calls this machine when [peers](#peers) are listed. 1 to 63 printable characters. |
 | `peers` | `[]` | Other machines' vigil services whose sessions this one lists, as `[[peers]]` tables; see [Peers](#peers). |
 | `peers[].name` | required | The peer's name in the machine column and in URLs: 1 to 63 letters, digits, `-` and `_`. Unique, and not the same as `machine`. |

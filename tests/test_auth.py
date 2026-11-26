@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import LOOPBACK_URL, VigilEnv
 from vigil import cli
-from vigil.config import ConfigError, ServerConfig, load_config
+from vigil.config import ConfigError, ServerConfig, TokenConfig, load_config
 from vigil.index.db import connect
 from vigil.index.scanner import scan
 from vigil.paths import data_dir
@@ -175,14 +175,14 @@ def test_token_file_must_be_regular(tmp_path: Path) -> None:
 
 
 def test_check_bind_address_with_token(tmp_path: Path) -> None:
-    token = write_token(tmp_path / "token")
-    check_bind_address("127.0.0.1")
+    server = ServerConfig(token_file=write_token(tmp_path / "token"))
+    check_bind_address("127.0.0.1", ServerConfig())
     for host in ("0.0.0.0", "::", "192.0.2.1", "::1", "fd00::1"):
-        check_bind_address(host, token)
+        check_bind_address(host, server)
     with pytest.raises(BindRefused, match="not an IP address"):
-        check_bind_address("vigil.example", token)
+        check_bind_address("vigil.example", server)
     with pytest.raises(BindRefused, match="127.0.0.1 only"):
-        check_bind_address("0.0.0.0", None)
+        check_bind_address("0.0.0.0", ServerConfig())
 
 
 def test_server_config(tmp_path: Path) -> None:
@@ -555,3 +555,19 @@ def test_loopback_still_works_without_token(
     # The DNS rebinding defence still holds for loopback.
     local = client_for(peer=LOCAL_PEER, base_url=LOOPBACK_URL)
     assert local.get("/api/v1/health", headers={"Host": "evil.example"}).status_code == 400
+
+
+# --- scoped tokens ------------------------------------------------------------------------------
+
+
+def test_check_bind_address_with_scoped_tokens(tmp_path: Path) -> None:
+    read = write_token(tmp_path / "read", token="read-" + TOKEN)
+    check_bind_address("192.0.2.5", ServerConfig(tokens=(TokenConfig(read, "read"),)))
+    loose = write_token(tmp_path / "loose", token="loose-" + TOKEN, mode=0o644)
+    with pytest.raises(BindRefused, match="0644; it must be 0600"):
+        check_bind_address(
+            "192.0.2.5",
+            ServerConfig(tokens=(TokenConfig(read, "read"), TokenConfig(loose, "full"))),
+        )
+    with pytest.raises(BindRefused, match="127.0.0.1 only"):
+        check_bind_address("192.0.2.5", ServerConfig())

@@ -13,6 +13,10 @@ from vigil.paths import config_path
 
 Launcher = Literal["auto", "bg", "tmux"]
 
+AccessScope = Literal["read", "push", "full"]
+"""What a remote credential may do (`vigil.web.security.authorize`): `read` is GET and HEAD on
+`/api/v1/*`; `push` is a hub's ingest for one machine; `full` is everything vigil's pages do."""
+
 
 class ConfigError(Exception):
     """The config file is unreadable, malformed, or has an invalid value."""
@@ -36,15 +40,34 @@ class UsageConfig:
 
 
 @dataclass(frozen=True)
+class TokenConfig:
+    """One `[[server.tokens]]` entry: a token file and what its token may do."""
+
+    file: Path
+    """The file holding the token; same rules as `server.token_file`."""
+    scope: AccessScope
+    machine: str | None = None
+    """The machine name a `push` token may push for (required for `push`, absent otherwise)."""
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     bind: str = "127.0.0.1"
-    """The address `vigil serve` listens on: an IP address. Anything but 127.0.0.1 needs
-    `token_file` (checked when the service starts, `vigil.web.security.check_bind_address`)."""
+    """The address `vigil serve` listens on: an IP address. Anything but 127.0.0.1 needs remote
+    access (checked when the service starts, `vigil.web.security.check_bind_address`)."""
     token_file: Path | None = None
-    """A file holding the access token for remote clients; it must be mode 0600 (or 0400)."""
+    """A file holding the `full` access token for remote clients; it must be mode 0600 (or
+    0400)."""
     allowed_hosts: tuple[str, ...] = ()
     """Host names (lowercase, no port; IPv6 in brackets) remote clients may use in `Host`, on
     top of the loopback names and the bind address."""
+    tokens: tuple[TokenConfig, ...] = ()
+    """More access tokens, each with a scope (`[[server.tokens]]`)."""
+
+    @property
+    def remote_enabled(self) -> bool:
+        """Whether remote access is configured: a `token_file` or any `tokens`."""
+        return self.token_file is not None or bool(self.tokens)
 
 
 @dataclass(frozen=True)
@@ -202,9 +225,39 @@ def _token_path(value: Any, name: str) -> Path:
     return path
 
 
+def _parse_tokens(value: Any) -> tuple[TokenConfig, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ConfigError("`server.tokens` must be an array of tables ([[server.tokens]])")
+    tokens: list[TokenConfig] = []
+    for number, table in enumerate(cast(list[dict[str, Any]], value), start=1):
+        where = f"server.tokens[{number}]"
+        _check_keys(table, {"file", "scope", "machine"}, where)
+        for key in ("file", "scope"):
+            if key not in table:
+                raise ConfigError(f"`{where}.{key}` is missing")
+        scope = table["scope"]
+        if scope not in get_args(AccessScope):
+            raise ConfigError(f"`{where}.scope` must be one of {', '.join(get_args(AccessScope))}")
+        machine: str | None = None
+        if scope == "push":
+            if "machine" not in table:
+                raise ConfigError(f"`{where}.machine` is missing: a push token is for one machine")
+            machine = check_machine_name(table["machine"], f"{where}.machine")
+        elif "machine" in table:
+            raise ConfigError(f"`{where}.machine` is only for scope push")
+        tokens.append(
+            TokenConfig(
+                file=_token_path(table["file"], f"{where}.file"),
+                scope=cast(AccessScope, scope),
+                machine=machine,
+            )
+        )
+    return tuple(tokens)
+
+
 def _parse_server(raw: dict[str, Any]) -> ServerConfig:
     table = _table(raw, "server")
-    _check_keys(table, {"bind", "token_file", "allowed_hosts"}, "server")
+    _check_keys(table, {"bind", "token_file", "allowed_hosts", "tokens"}, "server")
     defaults = ServerConfig()
     bind = defaults.bind
     if "bind" in table:
@@ -218,13 +271,22 @@ def _parse_server(raw: dict[str, Any]) -> ServerConfig:
     token_file = defaults.token_file
     if "token_file" in table:
         token_file = _token_path(table["token_file"], "server.token_file")
+    tokens = defaults.tokens
+    if "tokens" in table:
+        tokens = _parse_tokens(table["tokens"])
     allowed_hosts = defaults.allowed_hosts
     if "allowed_hosts" in table:
         names = _string_list(table["allowed_hosts"], "server.allowed_hosts")
         allowed_hosts = tuple(_allowed_host(name) for name in names)
-        if allowed_hosts and token_file is None:
-            raise ConfigError("`server.allowed_hosts` needs `server.token_file`")
-    return ServerConfig(bind=bind, token_file=token_file, allowed_hosts=allowed_hosts)
+    server = ServerConfig(
+        bind=bind, token_file=token_file, allowed_hosts=allowed_hosts, tokens=tokens
+    )
+    if allowed_hosts and not server.remote_enabled:
+        raise ConfigError(
+            "`server.allowed_hosts` needs remote access "
+            "(`server.token_file`, `[[server.tokens]]` or `[server.access]`)"
+        )
+    return server
 
 
 def _parse_review(raw: dict[str, Any]) -> ReviewConfig:
@@ -251,7 +313,18 @@ def _parse_review(raw: dict[str, Any]) -> ReviewConfig:
     return ReviewConfig(max_budget_usd=budget, model=model)
 
 
-_PEER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")
+MACHINE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")
+"""A machine name as peers and push tokens use it: 1 to 63 letters, digits, `-` and `_`,
+starting with a letter or digit."""
+
+
+def check_machine_name(value: Any, where: str) -> str:
+    """`value` when it is a machine name (`MACHINE_NAME`); else ConfigError naming `where`."""
+    if not isinstance(value, str) or not MACHINE_NAME.fullmatch(value):
+        raise ConfigError(
+            f"`{where}` must be 1 to 63 letters, digits, - or _ (starting with a letter or digit)"
+        )
+    return value
 
 
 def _peer_url(value: Any, where: str) -> str:
@@ -293,12 +366,7 @@ def _parse_peers(raw: dict[str, Any], machine: str | None) -> tuple[Peer, ...]:
         for key in ("name", "url", "token_file"):
             if key not in table:
                 raise ConfigError(f"`{where}.{key}` is missing")
-        name = table["name"]
-        if not isinstance(name, str) or not _PEER_NAME.fullmatch(name):
-            raise ConfigError(
-                f"`{where}.name` must be 1 to 63 letters, digits, - or _ "
-                "(starting with a letter or digit)"
-            )
+        name = check_machine_name(table["name"], f"{where}.name")
         if any(peer.name == name for peer in peers):
             raise ConfigError(f"`{where}.name`: two peers are called {name!r}")
         if name == machine:
@@ -332,8 +400,9 @@ def load_config(path: Path | None = None) -> Config:
 
     Raises ConfigError on unreadable or malformed TOML, unknown keys, wrong types, a default
     flag or review model outside the allow-list, a review budget out of range, a `server` value
-    that is not an address, path or host name, or a `peers` entry without a valid name, URL and
-    token file path.
+    that is not an address, path or host name, a `[[server.tokens]]` entry without a valid file,
+    scope and (for `push` only) machine, or a `peers` entry without a valid name, URL and token
+    file path.
     """
     path = path if path is not None else config_path()
     try:
