@@ -611,9 +611,10 @@ def scoped_app(vigil_env: VigilEnv, tmp_path: Path, token_file: Path) -> FastAPI
     )
 
 
-def test_scope_matrix(scoped_app: FastAPI) -> None:
+def test_scope_matrix(scoped_app: FastAPI, hub_app: FastAPI) -> None:
     """Every route of the app, from every kind of caller: the guard refuses exactly what
-    `authorize` refuses, with the scope needed, and lets the rest reach the route."""
+    `authorize` refuses, with the scope needed, and lets the rest reach the route. Then the same
+    for a hub's ingest routes, for each machine it lists."""
     remote = TestClient(scoped_app, base_url=REMOTE_URL, client=REMOTE_PEER)
     local = TestClient(scoped_app, base_url=LOOPBACK_URL, client=LOCAL_PEER)
     callers: dict[str, tuple[TestClient, Grant | None, dict[str, str]]] = {
@@ -660,6 +661,53 @@ def test_scope_matrix(scoped_app: FastAPI) -> None:
                     assert refusal.reason.startswith("needs scope "), where
                 checked += 1
     assert checked > 150
+    assert verdicts == {True, False}
+
+    # A hub's ingest routes, with `{name}` each machine the hub lists: only the push credential
+    # bound to that machine gets past the guard (the route then refuses the empty body).
+    from tests.conftest import FULL as HUB_FULL
+    from tests.conftest import HUB_HOST, PUSH_DESK, PUSH_LAPTOP
+    from tests.conftest import READ as HUB_READ
+
+    hub_remote = TestClient(hub_app, base_url=f"http://{HUB_HOST}", client=REMOTE_PEER)
+    hub_local = TestClient(hub_app, base_url=LOOPBACK_URL, client=LOCAL_PEER)
+    hub_callers: dict[str, tuple[TestClient, Grant | None, dict[str, str]]] = {
+        "none": (hub_remote, None, {}),
+        "read": (hub_remote, Grant("read"), bearer(HUB_READ)),
+        "push laptop": (hub_remote, Grant("push", "laptop"), bearer(PUSH_LAPTOP)),
+        "push desk": (hub_remote, Grant("push", "desk"), bearer(PUSH_DESK)),
+        "full": (hub_remote, FULL, bearer(HUB_FULL)),
+        "local": (hub_local, FULL, {"Origin": LOOPBACK_URL}),
+    }
+    ingest = [
+        (route.path, route.methods)
+        for route in iter_route_contexts(hub_app.routes)
+        if route.path is not None and route.path.startswith("/ingest/")
+    ]
+    assert sorted(path for path, _ in ingest) == [
+        "/ingest/{name}/heartbeat",
+        "/ingest/{name}/sessions",
+    ]
+    verdicts = set()
+    for route_path, methods in ingest:
+        assert methods is not None
+        for name in ("laptop", "desk"):
+            path = route_path.replace("{name}", name)
+            for method in sorted(methods):
+                for who, (client, grant, headers) in hub_callers.items():
+                    response = client.request(method, path, headers=headers, content=b"{}")
+                    where = f"hub {who} {method} {path}"
+                    if grant is None:
+                        assert response.status_code == 401, where
+                        continue
+                    refusal = authorize(grant, method, path)
+                    verdicts.add(refusal is None)
+                    if refusal is None:
+                        assert response.status_code == 422, where
+                        assert response.json()["ok"] is False, where
+                    else:
+                        assert response.status_code == 403, where
+                        assert response.json() == {"detail": refusal.reason}, where
     assert verdicts == {True, False}
 
 

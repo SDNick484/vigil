@@ -437,6 +437,27 @@ The pages also fetch two HTML fragments: `GET /sessions/{id}/reviews/{rid}` (one
 reloads itself while it runs) and `GET /reviews/{rid}/suggestions/{i}/change` (a file
 suggestion's diff and its Apply form, or the text to copy and why).
 
+On a hub (`mode = "hub"`), machines push their sessions to two more endpoints, outside
+`/api/v1`. Only a `push` credential bound to `{name}` may use them (see Scopes under
+[Remote access](#remote-access)), with no `Origin` header, and `{name}` must be one of the hub's
+`machines`; on a vigil that is not a hub they answer 404.
+
+- `PUT /ingest/{name}/sessions` replaces the machine's stored snapshot with the JSON body
+  `{"format": 1, "machine": "<name>", "generated_at": "<ISO>", "vigil_version": "<version>",
+  "live_checked_at": "<ISO or null>", "sessions": [...]}`, where each session has the fields of
+  `GET /api/v1/sessions` (at most 500). The hub checks it strictly: a known field with the wrong
+  type, a time that is not ISO 8601 or a session without `id` or `chain_id` refuses the whole
+  body; unknown fields are ignored, and text is cut to 500 characters. It answers
+  `{"ok": true, "received_at": "<ISO>"}`, or `{"ok": false, "reason": "<why>"}` with 403 (no
+  such machine on this hub), 413 (body over 8 MiB), 422 (malformed; the first problem named) or
+  500 (it could not be stored; the previous snapshot is kept). The snapshot is written to
+  `$XDG_DATA_HOME/vigil/hub/<name>.json` in one step.
+- `POST /ingest/{name}/heartbeat` with `{"generated_at": "<ISO>", "digest": "<hex>"}`, where
+  `digest` is the SHA-256 of the `sessions` array last sent as canonical JSON (sorted keys, no
+  whitespace, UTF-8), answers `{"ok": true}` and marks the machine seen when the stored snapshot
+  has that digest, else 409 `{"ok": false, "need_snapshot": true}`: the machine then sends the
+  whole snapshot.
+
 The service only answers requests whose `Host` is `127.0.0.1`, `localhost` or `[::1]` (400
 otherwise), which stops other web sites reaching it through DNS rebinding. A POST must carry an
 `Origin` header naming the same host and port it was sent to (403 otherwise), so other sites cannot
