@@ -23,6 +23,8 @@ dependencies = [
     "python-multipart",
     "httpx",
     "tomlkit",
+    "pyjwt",
+    "cryptography",
 ]
 
 [project.optional-dependencies]

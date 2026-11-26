@@ -37,6 +37,7 @@ def create_app(
     conn_factory: Callable[[], sqlite3.Connection] | None = None,
     start_watcher: bool = True,
     peer_transport: httpx.BaseTransport | None = None,
+    access_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     """The vigil web service.
 
@@ -51,7 +52,7 @@ def create_app(
     `running` by an earlier run of the service are marked failed (`vigil.review.store`); on
     shutdown, a review in progress has its `claude` stopped and is marked failed.
     """
-    remote = auth.load_auth(config.server, data_dir())
+    remote = auth.load_auth(config.server, data_dir(), access_transport=access_transport)
     factory = conn_factory or functools.partial(connect, index_path())
     hub = PeerHub(config.peers, cache_dir=data_dir() / CACHE_DIR, transport=peer_transport)
     web = WebState(config=config, conn_factory=factory, peers=hub)

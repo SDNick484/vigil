@@ -1,8 +1,8 @@
 """Remote access (v2): the access tokens, the browser session cookie, and the login page
 (`router`).
 
-Remote access is on only when `server.token_file` or `[[server.tokens]]` is set
-(`ServerConfig.remote_enabled`). Every token is a `Credential` with a `Grant`: a scope (`read`,
+Remote access is on only when `server.token_file`, `[[server.tokens]]` or `[server.access]` is
+set (`ServerConfig.remote_enabled`). Every token is a `Credential` with a `Grant`: a scope (`read`,
 `push` for one machine, or `full`; `server.token_file` is `full`). Then:
 
 - API clients send a token in every request: `Authorization: Bearer <token>`. The request may do
@@ -16,6 +16,9 @@ Remote access is on only when `server.token_file` or `[[server.tokens]]` is set
   them, when there are several), keyed with a random key kept in the data dir (`session.key`,
   created 0600). Changing a `full` token or deleting the key logs every browser out. With no
   `full` token there is no login page.
+- With `[server.access]`, requests through a proxy carry a Cloudflare Access assertion instead
+  (`vigil.web.access.AccessVerifier`, held in `AuthSettings.access`). They never get the login
+  page or a cookie: Access signs every request.
 
 Who needs to authenticate, and how a request is checked, is decided in `vigil.web.security`; this
 module only provides the pieces. Tokens and cookies are compared in constant time
@@ -34,13 +37,17 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from vigil.config import AccessScope, ServerConfig
 from vigil.web.pages import templates
+
+if TYPE_CHECKING:
+    from vigil.web.access import AccessVerifier
 
 SESSION_COOKIE = "vigil_session"
 SESSION_MAX_AGE = 30 * 24 * 3600
@@ -171,6 +178,10 @@ class Grant:
 
     scope: AccessScope
     machine: str | None = None
+    browser: bool = field(default=False, compare=False)
+    """The credential is one a browser sends on its own (a user signed in through Cloudflare
+    Access), so, as for the cookie, a request that changes something needs this service's
+    `Origin`. It says how the grant arrived, not what it allows, so it is not part of equality."""
 
 
 FULL = Grant("full")
@@ -195,6 +206,9 @@ class AuthSettings:
     """Host names (as `security.host_name` gives them) remote requests may use, besides the
     loopback names."""
     max_age: int = SESSION_MAX_AGE
+    access: AccessVerifier | None = None
+    """Checks Cloudflare Access assertions on proxied requests (`[server.access]`); None when it
+    is not configured."""
 
     def _match(self, token: str) -> Credential | None:
         """The credential whose token is `token`. Every credential is compared, in constant
@@ -283,12 +297,18 @@ def _load_credentials(server: ServerConfig) -> tuple[Credential, ...]:
     return tuple(credential for _, credential in named)
 
 
-def load_auth(server: ServerConfig, data_dir: Path) -> AuthSettings | None:
+def load_auth(
+    server: ServerConfig, data_dir: Path, *, access_transport: httpx.BaseTransport | None = None
+) -> AuthSettings | None:
     """The settings for remote access, or None when it is not configured
     (`server.remote_enabled`; loopback only, as in v1). Reads the tokens and the signing key
     (creating the key in `data_dir`); raises AuthError when one cannot be used, or when two
     entries hold the same token. The bind address, unless it is a wildcard, is an allowed host
-    too."""
+    too. With `server.access`, assertions are checked by an `AccessVerifier`, whose certs fetches
+    go through `access_transport` when given (tests)."""
+    # Imported here: vigil.web.access imports this module.
+    from vigil.web.access import AccessVerifier
+
     if not server.remote_enabled:
         return None
     credentials = _load_credentials(server)
@@ -300,6 +320,11 @@ def load_auth(server: ServerConfig, data_dir: Path) -> AuthSettings | None:
         credentials=credentials,
         signing_key=load_signing_key(data_dir / SIGNING_KEY_FILE),
         allowed_hosts=frozenset(hosts),
+        access=(
+            AccessVerifier(server.access, transport=access_transport)
+            if server.access is not None
+            else None
+        ),
     )
 
 
@@ -334,7 +359,10 @@ def settings(request: Request) -> AuthSettings | None:
 
 def _off() -> JSONResponse:
     return JSONResponse(
-        {"detail": "remote access is not enabled (no server.token_file or [[server.tokens]])"},
+        {
+            "detail": "remote access is not enabled "
+            "(no server.token_file, [[server.tokens]] or [server.access])"
+        },
         status_code=404,
     )
 
@@ -343,6 +371,14 @@ def _no_login() -> JSONResponse:
     return JSONResponse(
         {"detail": "no vigil login here: sign in through Cloudflare Access"}, status_code=404
     )
+
+
+def _through_access(request: Request) -> bool:
+    """Whether the guard let `request` in on a Cloudflare Access assertion."""
+    # Imported here: vigil.web.security imports this module.
+    from vigil.web.security import ACCESS_KEY
+
+    return request.scope.get(ACCESS_KEY) == "access"
 
 
 def _login_page(request: Request, next_path: str, error: str | None, status: int) -> Any:
@@ -356,7 +392,7 @@ def login_page(request: Request, next_path: Annotated[str, Query(alias="next")] 
     auth = settings(request)
     if auth is None:
         return _off()
-    if not auth.can_log_in:
+    if not auth.can_log_in or _through_access(request):
         return _no_login()
     response: Response = _login_page(request, safe_next(next_path), None, 200)
     return response
@@ -369,7 +405,7 @@ async def login(request: Request) -> Response:
     auth = settings(request)
     if auth is None:
         return _off()
-    if not auth.can_log_in:
+    if not auth.can_log_in or _through_access(request):
         return _no_login()
     form = await request.form()
     token, next_path = form.get("token"), safe_next(form.get("next"))
@@ -392,6 +428,8 @@ async def login(request: Request) -> Response:
 @router.post("/logout")
 def logout(request: Request) -> Response:
     """Forget the session cookie and go to the login page."""
+    if _through_access(request):
+        return _no_login()
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(
         SESSION_COOKIE,

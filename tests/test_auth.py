@@ -844,3 +844,290 @@ def test_cross_site_post_with_cookie_refused(
         client.get("/", headers={**BROWSER, "Referer": "https://hub.example.com/"}).status_code
         == 200
     )
+
+
+# --- Cloudflare Access ------------------------------------------------------------------------
+
+# Imported here rather than at the top so this file stays append-only.
+import threading  # noqa: E402
+
+from starlette.types import Scope  # noqa: E402
+
+from tests.conftest import (  # noqa: E402
+    ACCESS_AUD,
+    ACCESS_TEAM,
+    AccessKeys,
+    CertsServer,
+    make_assertion,
+)
+from vigil.web.access import ASSERTION_HEADER  # noqa: E402
+from vigil.web.security import Admitted, Refusal, check_request, needs_assertion  # noqa: E402
+
+HUB_HOST = "hub.example.com"
+HUB_URL = f"https://{HUB_HOST}"
+PROXIED = {"X-Forwarded-For": "192.0.2.7"}
+READ_CLIENT = "4567efab.access"
+FULL_CLIENT = "89abcdef.access"
+
+
+@pytest.fixture
+def certs(access_keys: AccessKeys) -> CertsServer:
+    return CertsServer(access_keys)
+
+
+@pytest.fixture
+def access_app(
+    vigil_env: VigilEnv, token_file: Path, certs: CertsServer, monkeypatch: pytest.MonkeyPatch
+) -> FastAPI:
+    """The service as a hub behind cloudflared would run it: `[server.access]` for
+    `author@example.com` and two service tokens (read and full), `HUB_HOST` allowed, a full
+    `token_file`, and `certs` as the team's certs endpoint."""
+    write_config(
+        vigil_env,
+        f'token_file = "{token_file}"\nallowed_hosts = ["{HUB_HOST}"]\n\n'
+        f'[server.access]\nteam_domain = "{ACCESS_TEAM}"\naud = "{ACCESS_AUD}"\n'
+        'emails = ["author@example.com"]\n\n'
+        f'[[server.access.service_tokens]]\nclient_id = "{READ_CLIENT}"\nscope = "read"\n\n'
+        f'[[server.access.service_tokens]]\nclient_id = "{FULL_CLIENT}"\nscope = "full"',
+    )
+    conn = connect(vigil_env.index)
+    scan(conn, vigil_env.claude_home)
+    conn.close()
+    return create_app(
+        load_config(),
+        conn_factory=lambda: connect(vigil_env.index),
+        start_watcher=False,
+        access_transport=certs,
+    )
+
+
+@pytest.fixture
+def client_for_access(access_app: FastAPI) -> Iterator[ClientFactory]:
+    """Clients of `access_app`; by default from loopback to `HUB_URL`, as cloudflared on the
+    same machine connects."""
+    clients: list[TestClient] = []
+
+    def make(peer: tuple[str, int] = LOCAL_PEER, base_url: str = HUB_URL) -> TestClient:
+        client = TestClient(access_app, base_url=base_url, client=peer, follow_redirects=False)
+        client.__enter__()
+        clients.append(client)
+        return client
+
+    yield make
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+def assertion_header(keys: AccessKeys, **claims: Any) -> dict[str, str]:
+    return {"Cf-Access-Jwt-Assertion": make_assertion(keys, **claims)}
+
+
+def test_access_user_browses(
+    client_for_access: ClientFactory, access_keys: AccessKeys, certs: CertsServer
+) -> None:
+    client = client_for_access()
+    signed = {**PROXIED, **BROWSER, **assertion_header(access_keys)}
+    response = client.get("/", headers=signed)
+    assert response.status_code == 200
+    assert "set-cookie" not in response.headers
+    assert "Log out" not in response.text
+    assert client.get("/api/v1/sessions", headers=signed).status_code == 200
+    assert certs.fetches == 1
+    # No vigil login through Access, and no cookie, even with the full token.
+    detail = {"detail": "no vigil login here: sign in through Cloudflare Access"}
+    response = client.get("/login", headers=signed)
+    assert (response.status_code, response.json()) == (404, detail)
+    response = client.post(
+        "/login", data={"token": TOKEN, "next": "/"}, headers={**signed, "Origin": HUB_URL}
+    )
+    assert (response.status_code, response.json()) == (404, detail)
+    assert "set-cookie" not in response.headers
+    response = client.post("/logout", headers={**signed, "Origin": HUB_URL})
+    assert response.status_code == 404
+    assert "set-cookie" not in response.headers
+    assert not client.cookies
+
+
+def test_access_post_needs_origin(
+    vigil_env: VigilEnv, client_for_access: ClientFactory, access_keys: AccessKeys
+) -> None:
+    client = client_for_access()
+    signed = {**PROXIED, **assertion_header(access_keys)}
+    url = f"/sessions/{NAMED}/meta"
+    response = client.post(url, data={"label": "none"}, headers=signed)
+    assert response.status_code == 403
+    response = client.post(
+        url, data={"label": "evil"}, headers={**signed, "Origin": "https://evil.example"}
+    )
+    assert response.status_code == 403
+    assert label(vigil_env) is None
+    response = client.post(url, data={"label": "hub"}, headers={**signed, "Origin": HUB_URL})
+    assert response.status_code == 200
+    assert label(vigil_env) == "hub"
+
+
+def test_access_service_token_scope(
+    vigil_env: VigilEnv, client_for_access: ClientFactory, access_keys: AccessKeys
+) -> None:
+    client = client_for_access()
+    reader = {**PROXIED, **assertion_header(access_keys, email=None, common_name=READ_CLIENT)}
+    assert client.get("/api/v1/sessions", headers=reader).status_code == 200
+    response = client.get("/", headers=reader)
+    assert (response.status_code, response.json()) == (403, {"detail": "needs scope full"})
+    # A service token is no browser's: a full one may post without Origin.
+    full = {**PROXIED, **assertion_header(access_keys, email=None, common_name=FULL_CLIENT)}
+    response = client.post(f"/sessions/{NAMED}/meta", data={"label": "service"}, headers=full)
+    assert response.status_code == 200
+    assert label(vigil_env) == "service"
+    # Unlisted identities are refused, naming them.
+    stranger = {**PROXIED, **assertion_header(access_keys, email="someone@example.com")}
+    response = client.get("/api/v1/sessions", headers=stranger)
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Cloudflare Access: identity not allowed: someone@example.com"
+    }
+
+
+def test_bearer_alone_on_proxied_request_refused(
+    client_for_access: ClientFactory, access_keys: AccessKeys
+) -> None:
+    proxied = client_for_access()
+    for peer in (LOCAL_PEER, REMOTE_PEER):
+        client = client_for_access(peer=peer)
+        for path in ("/", "/api/v1/sessions", "/login", "/static/style.css"):
+            response = client.get(path, headers={**PROXIED, **BROWSER, **bearer()})
+            assert response.status_code == 403, (peer, path)
+            assert response.json()["detail"].startswith("Cloudflare Access: "), (peer, path)
+            assert "location" not in response.headers
+    # Nor a cookie got by logging in directly (without a proxy) from another machine.
+    direct = client_for_access(peer=REMOTE_PEER)
+    assert log_in(direct, origin=HUB_URL).status_code == 303
+    cookie = direct.cookies[SESSION_COOKIE]
+    assert direct.get("/", headers=BROWSER).status_code == 200
+    response = proxied.get(
+        "/", headers={**PROXIED, **BROWSER, "Cookie": f"{SESSION_COOKIE}={cookie}"}
+    )
+    assert response.status_code == 403
+    # A bad assertion is refused even with a good token beside it.
+    expired = assertion_header(access_keys, exp=int(time.time()) - 3600)
+    response = proxied.get("/api/v1/sessions", headers={**PROXIED, **expired, **bearer()})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Cloudflare Access: assertion expired (exp)"}
+
+
+def test_tunnel_on_loopback_needs_assertion(
+    client_for_access: ClientFactory, access_keys: AccessKeys
+) -> None:
+    """Review focus 1: cloudflared connects from 127.0.0.1, naming the public host, with or
+    without proxy headers. Neither is local, so both need Access, and a bearer is no
+    substitute."""
+    client = client_for_access(peer=LOCAL_PEER, base_url=HUB_URL)
+    for proxy in ({}, PROXIED, {"Cf-Connecting-Ip": "192.0.2.7"}):
+        response = client.get("/api/v1/sessions", headers={**proxy, **bearer()})
+        assert response.status_code == 403, proxy
+        assert response.json()["detail"].startswith("Cloudflare Access: "), proxy
+        # With a valid assertion, the Authorization header is not looked at.
+        signed = {**proxy, **assertion_header(access_keys), "Authorization": "Bearer wrong"}
+        assert client.get("/api/v1/sessions", headers=signed).status_code == 200, proxy
+    # A loopback Host with proxy headers is not local either.
+    client = client_for_access(peer=LOCAL_PEER, base_url=LOOPBACK_URL)
+    response = client.get("/api/v1/sessions", headers={**PROXIED, **bearer()})
+    assert response.status_code == 403
+    signed = {**PROXIED, **assertion_header(access_keys)}
+    assert client.get("/api/v1/sessions", headers=signed).status_code == 200
+
+
+def test_direct_remote_uses_bearer(
+    client_for_access: ClientFactory, access_keys: AccessKeys, certs: CertsServer
+) -> None:
+    client = client_for_access(peer=REMOTE_PEER, base_url=HUB_URL)
+    assert client.get("/api/v1/sessions", headers=bearer()).status_code == 200
+    # An assertion means nothing without a proxy in between: the bearer rules apply.
+    response = client.get("/api/v1/sessions", headers=assertion_header(access_keys))
+    assert response.status_code == 401
+    assert certs.fetches == 0
+
+
+def test_loopback_stays_local_with_access(
+    client_for_access: ClientFactory, certs: CertsServer
+) -> None:
+    client = client_for_access(peer=LOCAL_PEER, base_url=LOOPBACK_URL)
+    assert client.get("/api/v1/sessions").status_code == 200
+    assert client.get("/", headers=BROWSER).status_code == 200
+    assert certs.fetches == 0
+
+
+def test_slow_certs_do_not_block_local_requests(
+    client_for_access: ClientFactory, access_keys: AccessKeys, certs: CertsServer
+) -> None:
+    """Review focus 5: while the certs endpoint is slow, loopback requests are still served."""
+    certs.block = threading.Event()
+    client = client_for_access()
+    signed = {**PROXIED, **assertion_header(access_keys)}
+    answers: list[int] = []
+    proxied = threading.Thread(
+        target=lambda: answers.append(client.get("/api/v1/health", headers=signed).status_code)
+    )
+    proxied.start()
+    try:
+        deadline = time.monotonic() + 5
+        while certs.fetches == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert certs.fetches == 1
+        local = client_for_access(peer=LOCAL_PEER, base_url=LOOPBACK_URL)
+        # The same client (one event loop) as the waiting request, and a second one.
+        assert client.get("/api/v1/health", headers={"Host": "127.0.0.1:7787"}).status_code == 200
+        assert local.get("/api/v1/health").status_code == 200
+        assert proxied.is_alive()
+        assert answers == []
+    finally:
+        certs.block.set()
+        proxied.join(10)
+    assert answers == [200]
+
+
+def _scope(peer: tuple[str, int] | None, host: str, **headers: str) -> Scope:
+    raw = [(b"host", host.encode())]
+    # Keyword names stand for header names: `x_forwarded_for` is `x-forwarded-for`.
+    raw += [(name.replace("_", "-").encode(), value.encode()) for name, value in headers.items()]
+    return {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/sessions",
+        "headers": raw,
+        "client": peer,
+        "query_string": b"",
+    }
+
+
+def test_needs_assertion_rules(access_app: FastAPI) -> None:
+    auth = access_app.state.vigil_auth
+    assert auth.access is not None
+    assert not needs_assertion(_scope(LOCAL_PEER, "127.0.0.1:7787"), auth)
+    assert not needs_assertion(_scope(REMOTE_PEER, HUB_HOST), auth)
+    assert needs_assertion(_scope(LOCAL_PEER, HUB_HOST), auth)
+    assert needs_assertion(_scope(LOCAL_PEER, "127.0.0.1", x_forwarded_for="192.0.2.7"), auth)
+    assert needs_assertion(_scope(REMOTE_PEER, HUB_HOST, forwarded="for=192.0.2.7"), auth)
+    # A connection whose address the server did not give could be the tunnel: fail closed.
+    assert needs_assertion(_scope(None, HUB_HOST), auth)
+    # A Host vigil does not answer on is refused before Access is asked.
+    assert not needs_assertion(_scope(LOCAL_PEER, "evil.example"), auth)
+    # Without [server.access] nothing needs an assertion.
+    assert not needs_assertion(_scope(LOCAL_PEER, HUB_HOST), replace(auth, access=None))
+
+
+def test_check_request_with_access_fails_closed(access_app: FastAPI) -> None:
+    auth = access_app.state.vigil_auth
+    tunnel = _scope(LOCAL_PEER, HUB_HOST, authorization=f"Bearer {TOKEN}")
+    for assertion in (None, "bad signature"):
+        refusal = check_request(tunnel, auth, assertion)
+        assert isinstance(refusal, Refusal)
+        assert refusal.status == 403
+        assert refusal.reason.startswith("Cloudflare Access: ")
+    assert check_request(tunnel, auth, Grant("read")) == Admitted("access", Grant("read"))
+    # Direct and local requests do not look at an assertion.
+    direct = _scope(REMOTE_PEER, HUB_HOST, authorization=f"Bearer {TOKEN}")
+    assert check_request(direct, auth, "bad signature") == Admitted("bearer", FULL)
+    local = _scope(LOCAL_PEER, "127.0.0.1:7787")
+    assert check_request(local, auth, "bad signature") == Admitted("local", FULL)
+    assert ASSERTION_HEADER == "cf-access-jwt-assertion"
