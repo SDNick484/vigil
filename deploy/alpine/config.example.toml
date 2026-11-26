@@ -1,0 +1,41 @@
+# vigil hub config: install.sh copies this to /etc/vigil/config.toml when there is none, and never
+# overwrites it. Every host name, e-mail address, tag and token below is a placeholder.
+
+# This vigil is a hub: it indexes nothing and never runs `claude`; it keeps the sessions your
+# machines push to it.
+mode = "hub"
+
+[hub_mode]
+# The hub's public address, used to build links to its pages.
+public_url = "https://hub.example.com"
+
+# One entry per machine allowed to push. `name` is the name the machine sets as `machine` in its
+# own config; `url` is its own vigil, used for the "Resume on laptop" link only.
+[[machines]]
+name = "laptop"
+url = "http://laptop.example-tailnet.ts.net:7787"
+
+[server]
+# cloudflared (or another proxy) on this host connects to 127.0.0.1:7787.
+bind = "127.0.0.1"
+allowed_hosts = ["hub.example.com"]
+
+# Cloudflare Access: the hub checks the assertion Access sends with every proxied request.
+[server.access]
+team_domain = "example-team.cloudflareaccess.com"
+aud = "REPLACE-WITH-AUD-TAG"
+# People who may do everything (browse the hub's pages) after signing in through Access.
+emails = ["you@example.com"]
+
+# One service token per machine, so it can push without a second secret.
+[[server.access.service_tokens]]
+client_id = "REPLACE.access"
+scope = "push"
+machine = "laptop"
+
+# A token for reading `/api/v1/*` (a dashboard, say), for requests that do not come through
+# Access. The file must be owned by the vigil user with mode 0600; create it as install.sh says,
+# or delete this table. vigil stops at start-up if the file is missing.
+[[server.tokens]]
+file = "/etc/vigil/read.token"
+scope = "read"

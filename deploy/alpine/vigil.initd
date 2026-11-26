@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+# vigil hub as an OpenRC service on Alpine, run by the system user "vigil".
+# install.sh puts this file in /etc/init.d/vigil. Enable and start it with
+#   rc-update add vigil default
+#   rc-service vigil start
+
+description="vigil hub: sessions pushed by your machines, in one place"
+
+command=/opt/vigil/venv/bin/vigil
+command_args="serve"
+command_user="vigil:vigil"
+supervisor=supervise-daemon
+output_log=/var/log/vigil.log
+error_log=/var/log/vigil.log
+
+# vigil reads /etc/vigil/config.toml and keeps its data in /var/lib/vigil.
+export XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
+
+depend() {
+    need net
+}
+
+start_pre() {
+    # The supervised process writes the log as "vigil", so the file must be its own.
+    checkpath -f -m 0640 -o vigil:vigil /var/log/vigil.log
+}
