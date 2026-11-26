@@ -1484,3 +1484,17 @@ def test_forward_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     network = Network(hosts={PEER_B_HOST: lambda r: httpx.Response(200, json={"ok": True})})
     answer = peers.forward(peer, "GET", "/x", timeout=1.0, transport=network.transport())
     assert answer == (502, {"ok": False, "reason": "peer-b: timed out after 1 s"})
+
+
+def test_peer_remote_urls_validated() -> None:
+    session = session_from_dict(
+        {"id": C_SESSION, "remote_urls": ["https://claude.ai/code/x1", "javascript:alert(1)", 3]},
+        "peer-b",
+    )
+    assert session is not None
+    assert session.remote_urls == ("https://claude.ai/code/x1",)
+    many = [f"https://claude.ai/code/l{n}" for n in range(60)]
+    capped = session_from_dict({"id": C_SESSION, "remote_urls": many}, "peer-b")
+    assert capped is not None and len(capped.remote_urls) == 50
+    absent = session_from_dict({"id": C_SESSION}, "peer-b")
+    assert absent is not None and absent.remote_urls == ()

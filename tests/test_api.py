@@ -995,3 +995,9 @@ def test_api_serves_open_url(vigil_env: VigilEnv, web_client: TestClient, tmp_pa
     assert by_id[NAMED]["open_url"] == LINK  # live, with this run's link
     assert by_id[PLAIN]["open_url"] is None  # a link, but not live
     assert web_client.get(f"/api/v1/sessions/{NAMED}").json()["open_url"] == LINK
+
+
+def test_sessions_have_remote_urls(web_client: TestClient) -> None:
+    items = web_client.get("/api/v1/sessions").json()
+    assert items
+    assert all(isinstance(item["remote_urls"], list) for item in items)

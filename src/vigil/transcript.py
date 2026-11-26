@@ -34,6 +34,8 @@ What is read, as found in real Claude Code 2.1.312 transcripts (see tests/fixtur
 - `remote_url` / `remote_url_at`: the `url` and `timestamp` of the newest `system` record whose
   `subtype` is `bridge_status` (written when `/remote-control` is active), when the URL is a
   `https://claude.ai/code/...` link (`REMOTE_URL`). System records are not messages.
+- `remote_urls`: every such URL (with a timestamp) in file order, oldest first; a URL seen again
+  moves to the end; only the newest `MAX_REMOTE_URLS` are kept.
 - `previous_session_id`: 2.1.312 records carry no reference to a previous session. `claude -p
   --resume <id>` appends to the same file; `--fork-session` writes a new file that copies the
   earlier messages (same `uuid`s, new `sessionId`) without naming the source session. So this is
@@ -77,6 +79,9 @@ _SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
 REMOTE_URL = re.compile(r"https://claude\.ai/code/[A-Za-z0-9_-]{1,128}")
 """A Claude Remote Control link; only a `fullmatch` is kept."""
 
+MAX_REMOTE_URLS = 50
+"""How many Remote Control links of one session are kept (the newest)."""
+
 
 @dataclass
 class SessionFacts:
@@ -96,6 +101,7 @@ class SessionFacts:
     previous_session_id: str | None = None
     remote_url: str | None = None
     remote_url_at: datetime | None = None
+    remote_urls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -184,6 +190,10 @@ def _apply_bridge_status(facts: SessionFacts, record: dict[str, Any], at: dateti
     url = _bridge_url(record)
     if url is None or at is None:
         return
+    if url in facts.remote_urls:
+        facts.remote_urls.remove(url)
+    facts.remote_urls.append(url)
+    del facts.remote_urls[:-MAX_REMOTE_URLS]
     if facts.remote_url_at is None or at >= facts.remote_url_at:
         facts.remote_url = url
         facts.remote_url_at = at

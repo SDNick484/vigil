@@ -21,6 +21,7 @@ only if the file's stored state is still what it started from.
 The scanner only reads under the Claude home; everything it writes goes to the index.
 """
 
+import json
 import logging
 import socket
 import sqlite3
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from vigil.index.db import from_db, to_db
+from vigil.index.db import from_db, to_db, urls_from_db
 from vigil.projects import project_for
 from vigil.transcript import FeatureKind, SessionFacts, parse_transcript
 
@@ -190,6 +191,7 @@ def _load_facts(conn: sqlite3.Connection, session_id: str) -> SessionFacts | Non
         previous_session_id=row["previous_session_id"],
         remote_url=row["remote_url"],
         remote_url_at=from_db(row["remote_url_at"]),
+        remote_urls=urls_from_db(row["remote_urls"]),
     )
 
 
@@ -211,8 +213,8 @@ def _store_facts(conn: sqlite3.Connection, facts: SessionFacts, key: str, machin
             session_id, cwd, git_branch, version, title, first_prompt, last_user,
             last_assistant, started_at, last_activity_at, message_count, previous_session_id,
             machine, project_key, project_label, chain_id, transcript_path, remote_url,
-            remote_url_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            remote_url_at, remote_urls
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (session_id) DO UPDATE SET
             cwd = excluded.cwd, git_branch = excluded.git_branch, version = excluded.version,
             title = excluded.title, first_prompt = excluded.first_prompt,
@@ -222,7 +224,8 @@ def _store_facts(conn: sqlite3.Connection, facts: SessionFacts, key: str, machin
             previous_session_id = excluded.previous_session_id, machine = excluded.machine,
             project_key = excluded.project_key, project_label = excluded.project_label,
             chain_id = excluded.chain_id, transcript_path = excluded.transcript_path,
-            remote_url = excluded.remote_url, remote_url_at = excluded.remote_url_at
+            remote_url = excluded.remote_url, remote_url_at = excluded.remote_url_at,
+            remote_urls = excluded.remote_urls
         """,
         (
             sid,
@@ -244,6 +247,7 @@ def _store_facts(conn: sqlite3.Connection, facts: SessionFacts, key: str, machin
             key,
             facts.remote_url,
             to_db(facts.remote_url_at),
+            json.dumps(facts.remote_urls),
         ),
     )
     conn.execute("DELETE FROM session_models WHERE session_id = ?", (sid,))

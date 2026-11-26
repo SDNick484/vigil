@@ -401,3 +401,19 @@ def test_remote_url_stored_and_listed(home: Path, conn: sqlite3.Connection) -> N
     assert row.remote_url == "https://claude.ai/code/session_PLACEHOLDER03"
     assert row.remote_url_at == datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
     assert row.message_count == count
+
+
+def test_remote_urls_stored(home: Path, conn: sqlite3.Connection) -> None:
+    shutil.copy(
+        FIXTURE_TRANSCRIPTS / "handmade" / "remote-control.jsonl",
+        home / "projects" / HANDMADE_PROJECT_DIR / "remote-control.jsonl",
+    )
+    scan(conn, home)
+    row = get_session(conn, REMOTE)
+    assert row is not None
+    assert row.remote_urls == (
+        "https://claude.ai/code/session_PLACEHOLDER01",
+        "https://claude.ai/code/session_PLACEHOLDER02",
+    )
+    assert row.remote_urls[-1] == row.remote_url
+    assert get_session(conn, PLAIN).remote_urls == ()  # type: ignore[union-attr]

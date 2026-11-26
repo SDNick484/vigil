@@ -5,6 +5,7 @@ each in its own transaction, and recorded in `schema_migrations`. A migration is
 released; a change is a new file.
 """
 
+import json
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -89,3 +90,12 @@ def to_db(at: datetime | None) -> str | None:
 def from_db(value: str | None) -> datetime | None:
     """Decode a timestamp written by `to_db`."""
     return datetime.fromisoformat(value) if value is not None else None
+
+
+def urls_from_db(value: str | None) -> list[str]:
+    """Decode the `remote_urls` column (a JSON array of strings); anything else is empty."""
+    try:
+        data = json.loads(value) if value else []
+    except ValueError:
+        return []
+    return [item for item in data if isinstance(item, str)] if isinstance(data, list) else []
