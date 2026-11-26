@@ -571,10 +571,10 @@ cover gets 403 naming the scope it needs. Only a `full` token logs a browser in.
 need no token and can do everything but ingest.
 
 **Browsers** are sent to `/login`, where you paste the token once. vigil then sets a session
-cookie (`vigil_session`) that lasts 30 days: HttpOnly, SameSite=Strict, and Secure when the page
-came over HTTPS. Because it is SameSite=Strict, following a link to vigil from another site shows
-the login page; open vigil directly instead. A POST made with the cookie must still carry this
-service's own `Origin`, as vigil's pages do. **Log out** in the header clears the cookie. The
+cookie (`vigil_session`) that lasts 30 days: HttpOnly, SameSite=Lax, and Secure when the page
+came over HTTPS, so following a link to vigil from another site (a hub, say) opens it signed in.
+A POST made with the cookie must still carry this service's own `Origin`, as vigil's pages do, so
+another site cannot act with it. **Log out** in the header clears the cookie. The
 cookie is signed with a random key that vigil creates in its data folder
 (`$XDG_DATA_HOME/vigil/session.key`, mode 0600); delete it, or change the token, to log every
 browser out.

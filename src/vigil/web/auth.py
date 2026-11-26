@@ -8,11 +8,14 @@ Remote access is on only when `server.token_file` or `[[server.tokens]]` is set
 - API clients send a token in every request: `Authorization: Bearer <token>`. The request may do
   what the token's grant allows (`vigil.web.security.authorize`).
 - Browsers post a `full` token once to `/login` and get a session cookie (`vigil_session`):
-  HttpOnly, SameSite=Strict, Path=/, Secure when the page was loaded over HTTPS, valid for 30
-  days, and as good as a `full` token. Its value is an expiry time and an HMAC-SHA256 over that
-  time and a digest of the `full` token (of all of them, when there are several), keyed with a
-  random key kept in the data dir (`session.key`, created 0600). Changing a `full` token or
-  deleting the key logs every browser out. With no `full` token there is no login page.
+  HttpOnly, SameSite=Lax, Path=/, Secure when the page was loaded over HTTPS, valid for 30 days,
+  and as good as a `full` token. Lax, so that following a link from another site (a hub's
+  "Resume on <machine>") arrives signed in; every state-changing request is a POST, and the guard
+  refuses a POST made with the cookie unless its `Origin` is this service. Its value is an
+  expiry time and an HMAC-SHA256 over that time and a digest of the `full` token (of all of
+  them, when there are several), keyed with a random key kept in the data dir (`session.key`,
+  created 0600). Changing a `full` token or deleting the key logs every browser out. With no
+  `full` token there is no login page.
 
 Who needs to authenticate, and how a request is checked, is decided in `vigil.web.security`; this
 module only provides the pieces. Tokens and cookies are compared in constant time
@@ -381,7 +384,7 @@ async def login(request: Request) -> Response:
         path="/",
         secure=is_https(request.url.scheme, request.headers),
         httponly=True,
-        samesite="strict",
+        samesite="lax",
     )
     return response
 
@@ -395,6 +398,6 @@ def logout(request: Request) -> Response:
         path="/",
         secure=is_https(request.url.scheme, request.headers),
         httponly=True,
-        samesite="strict",
+        samesite="lax",
     )
     return response

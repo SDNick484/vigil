@@ -38,6 +38,7 @@ All notable changes to this project are recorded here, in the style of
 - `vigil setup`: picks and installs XDG autostart, a systemd user unit or an OpenRC user service (`--method`, `--dry-run`, `--yes`, `--no-start`), starts vigil and checks that it answers, and `--remove` undoes only what it wrote; the service templates now ship inside the package (`contrib/` keeps identical copies).
 - `vigil doctor`: read-only checks (Python, `vigil` and `claude` on `PATH`, Claude home, index, config, display and terminal, port, autostart or service) with a fix for each problem; `--json`; exits 1 on a problem, and a broken config is reported as a problem instead of stopping it.
 - `remote_urls` on every session: each Remote Control link its transcript recorded, oldest first.
+- Scoped access tokens: `[[server.tokens]]` with scope `read`, `push` (bound to one machine) or `full`; the login cookie is now SameSite=Lax.
 
 ### Changed
 - Install guide rewritten step by step: install without pipx (a virtual environment), checks after each step, which way to keep vigil running, upgrade, uninstall and troubleshooting; the service files also look for `claude` in `/opt/bin`.

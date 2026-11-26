@@ -347,7 +347,7 @@ def test_login_sets_cookie_and_pages_work(vigil_env: VigilEnv, client_for: Clien
     cookie = response.headers["set-cookie"]
     assert cookie.startswith(f"{SESSION_COOKIE}=")
     attributes = {part.strip().lower() for part in cookie.split(";")[1:]}
-    assert {"httponly", "samesite=strict", "path=/"} <= attributes
+    assert {"httponly", "samesite=lax", "path=/"} <= attributes
     assert "secure" not in attributes  # plain http
     assert any(a.startswith("max-age=") for a in attributes)
 
@@ -811,3 +811,36 @@ def test_credential_repr_hides_token() -> None:
     credential = Credential(TOKEN, Grant("read"))
     assert TOKEN not in repr(credential)
     assert TOKEN not in repr(AuthSettings(credentials=(credential,), signing_key=b"k" * 32))
+
+
+# --- the login cookie -------------------------------------------------------------------------
+
+
+def test_cookie_is_samesite_lax(client_for: ClientFactory) -> None:
+    client = client_for()
+    response = log_in(client)
+    assert response.status_code == 303
+    assert "samesite=lax" in response.headers["set-cookie"].lower()
+    response = client.post("/logout", headers={"Origin": REMOTE_URL})
+    assert "samesite=lax" in response.headers["set-cookie"].lower()
+
+
+def test_cross_site_post_with_cookie_refused(
+    vigil_env: VigilEnv, client_for: ClientFactory
+) -> None:
+    """Lax sends the cookie on a top-level navigation from another site; a POST from there is
+    still refused for its Origin."""
+    client = client_for()
+    log_in(client)
+    response = client.post(
+        f"/sessions/{NAMED}/meta",
+        data={"label": "cross-site"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert response.status_code == 403
+    assert label(vigil_env) is None
+    # A link from another site opens pages signed in.
+    assert (
+        client.get("/", headers={**BROWSER, "Referer": "https://hub.example.com/"}).status_code
+        == 200
+    )
