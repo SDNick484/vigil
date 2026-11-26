@@ -110,8 +110,8 @@ def check_bind_address(host: str, server: ServerConfig) -> None:
     if not server.remote_enabled:
         raise BindRefused(
             f"refusing to listen on {host}: vigil serves on {BIND_ADDRESS} only unless remote "
-            "access is configured (server.token_file or [[server.tokens]]; see Remote access in "
-            "the README)"
+            "access is configured (server.token_file, [[server.tokens]] or [server.access]; see "
+            "Remote access in the README)"
         )
     try:
         ipaddress.ip_address(host)

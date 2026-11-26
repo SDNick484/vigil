@@ -245,3 +245,113 @@ def test_machine_name_check() -> None:
     for value in ("bad name", "-lead", "", "a" * 64, 3, None):
         with pytest.raises(ConfigError, match="`where` must be 1 to 63 letters"):
             check_machine_name(value, "where")
+
+
+# --- [server.access] ----------------------------------------------------------------------------
+
+# Imported here rather than at the top so this file stays append-only.
+from vigil.config import AccessConfig, ServerConfig, ServiceTokenConfig  # noqa: E402
+
+TEAM = "example-team.cloudflareaccess.com"
+ACCESS = f'[server.access]\nteam_domain = "{TEAM}"\naud = "aud-placeholder"\n'
+
+
+def test_server_access_parsed(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        ACCESS + 'emails = ["Author@Example.com"]\n\n'
+        "[[server.access.service_tokens]]\n"
+        'client_id = "0123abcd.access"\nscope = "push"\nmachine = "laptop"\n',
+    )
+    access = load_config(path).server.access
+    assert access == AccessConfig(
+        team_domain="example-team.cloudflareaccess.com",
+        aud=("aud-placeholder",),
+        emails=frozenset({"author@example.com"}),
+        service_tokens=(ServiceTokenConfig("0123abcd.access", "push", "laptop"),),
+    )
+    assert access.aud == ("aud-placeholder",)
+    assert access.emails == frozenset({"author@example.com"})
+    listed = write(
+        tmp_path,
+        '[server.access]\nteam_domain = "Example-Team.cloudflareaccess.com"\n'
+        'aud = ["aud-one", "aud-two"]\n',
+    )
+    access = load_config(listed).server.access
+    assert access is not None
+    assert access.team_domain == "example-team.cloudflareaccess.com"
+    assert access.aud == ("aud-one", "aud-two")
+    assert access.emails == frozenset()
+    assert access.service_tokens == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "where"),
+    [
+        (ACCESS.replace(TEAM, "hub.example.com"), "team_domain"),
+        (
+            ACCESS.replace(TEAM, "cloudflareaccess.com"),
+            "team_domain",
+        ),
+        (
+            ACCESS.replace(TEAM, "https://x.cloudflareaccess.com"),
+            "team_domain",
+        ),
+        (ACCESS.replace('"aud-placeholder"', "[]"), "server.access.aud"),
+        (ACCESS.replace('"aud-placeholder"', "3"), "server.access.aud"),
+        (ACCESS.replace('"aud-placeholder"', '["ok", ""]'), "server.access.aud"),
+        (ACCESS.replace('"aud-placeholder"', '"  "'), "server.access.aud"),
+        ('[server.access]\naud = "aud-placeholder"\n', "server.access.team_domain"),
+        ('[server.access]\nteam_domain = "example-team.cloudflareaccess.com"\n', "aud"),
+        (ACCESS + 'emails = "author@example.com"\n', "server.access.emails"),
+        (ACCESS + 'emails = [""]\n', "server.access.emails"),
+        (ACCESS + 'emails = ["two words@example.com"]\n', "server.access.emails"),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = "a.access"\nscope = "push"\n',
+            "server.access.service_tokens[1].machine",
+        ),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = "a.access"\nscope = "read"\n\n'
+            '[[server.access.service_tokens]]\nclient_id = "a.access"\nscope = "full"\n',
+            "server.access.service_tokens[2].client_id",
+        ),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = "a b"\nscope = "read"\n',
+            "server.access.service_tokens[1].client_id",
+        ),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = ""\nscope = "read"\n',
+            "server.access.service_tokens[1].client_id",
+        ),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = "a.access"\nscope = "admin"\n',
+            "server.access.service_tokens[1].scope",
+        ),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = "a.access"\nscope = "read"\n'
+            'machine = "laptop"\n',
+            "server.access.service_tokens[1].machine",
+        ),
+        (
+            ACCESS + '[[server.access.service_tokens]]\nclient_id = "a.access"\nscope = "read"\n'
+            'file = "/tmp/t"\n',
+            "server.access.service_tokens[1].file",
+        ),
+        (ACCESS + 'service_tokens = ["a.access"]\n', "server.access.service_tokens"),
+        (ACCESS + 'teams = ["x"]\n', "server.access.teams"),
+        ('[server]\naccess = "example-team.cloudflareaccess.com"\n', "server.access"),
+    ],
+)
+def test_server_access_refused(tmp_path: Path, text: str, where: str) -> None:
+    with pytest.raises(ConfigError, match=re.escape(where)):
+        load_config(write(tmp_path, text))
+
+
+def test_access_turns_remote_on(tmp_path: Path) -> None:
+    access = AccessConfig(team_domain="example-team.cloudflareaccess.com", aud=("aud-placeholder",))
+    assert ServerConfig(access=access).remote_enabled is True
+    assert ServerConfig().remote_enabled is False
+    path = write(tmp_path, '[server]\nallowed_hosts = ["hub.example.com"]\n\n' + ACCESS)
+    server = load_config(path).server
+    assert server.allowed_hosts == ("hub.example.com",)
+    assert server.access == access

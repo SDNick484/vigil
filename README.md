@@ -290,6 +290,14 @@ type or a disallowed value stops vigil with an error that names it. The index is
 | `server.tokens[].file` | required | File holding the token. Same rules as `server.token_file`. |
 | `server.tokens[].scope` | required | What the token may do: `"read"`, `"push"` or `"full"`. |
 | `server.tokens[].machine` | unset | The one machine a `"push"` token may push for (required for `"push"`, not allowed otherwise): 1 to 63 letters, digits, `-` and `_`. |
+| `server.access` | unset | Cloudflare Access verification, as a `[server.access]` table; it turns remote access on, and then every proxied request needs a valid Access assertion. See Behind Cloudflare Access under [Remote access](#remote-access). |
+| `server.access.team_domain` | required | Your team's domain, `<team>.cloudflareaccess.com` (no scheme or path). The signing keys come from `https://<team_domain>/cdn-cgi/access/certs`. |
+| `server.access.aud` | required | The Access application's audience (AUD) tag, or a list of tags; an assertion must name one of them. |
+| `server.access.emails` | `[]` | User emails (any case) that get `full` access when signed in through Access. |
+| `server.access.service_tokens` | `[]` | Access service tokens, as `[[server.access.service_tokens]]` tables. |
+| `server.access.service_tokens[].client_id` | required | The service token's client ID (`<id>.access`). Each may be listed once. |
+| `server.access.service_tokens[].scope` | required | What the service token may do: `"read"`, `"push"` or `"full"`. |
+| `server.access.service_tokens[].machine` | unset | As `server.tokens[].machine`: required for `"push"`, not allowed otherwise. |
 | `machine` | host name | What the machine column calls this machine when [peers](#peers) are listed. 1 to 63 printable characters. |
 | `peers` | `[]` | Other machines' vigil services whose sessions this one lists, as `[[peers]]` tables; see [Peers](#peers). |
 | `peers[].name` | required | The peer's name in the machine column and in URLs: 1 to 63 letters, digits, `-` and `_`. Unique, and not the same as `machine`. |

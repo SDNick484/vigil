@@ -51,6 +51,31 @@ class TokenConfig:
 
 
 @dataclass(frozen=True)
+class ServiceTokenConfig:
+    """One `[[server.access.service_tokens]]` entry: a Cloudflare Access service token, known by
+    its client ID (the `common_name` claim of its assertions), and what it may do."""
+
+    client_id: str
+    scope: AccessScope
+    machine: str | None = None
+    """As for `TokenConfig.machine`: required for `push`, absent otherwise."""
+
+
+@dataclass(frozen=True)
+class AccessConfig:
+    """`[server.access]`: verify Cloudflare Access assertions on proxied requests
+    (`vigil.web.access`)."""
+
+    team_domain: str
+    """`<team>.cloudflareaccess.com`, lowercase: where the signing keys are and who issues."""
+    aud: tuple[str, ...]
+    """The Access application's audience tags; an assertion must name one of them."""
+    emails: frozenset[str] = frozenset()
+    """User emails (lowercase) that get `full`."""
+    service_tokens: tuple[ServiceTokenConfig, ...] = ()
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     bind: str = "127.0.0.1"
     """The address `vigil serve` listens on: an IP address. Anything but 127.0.0.1 needs remote
@@ -63,11 +88,13 @@ class ServerConfig:
     top of the loopback names and the bind address."""
     tokens: tuple[TokenConfig, ...] = ()
     """More access tokens, each with a scope (`[[server.tokens]]`)."""
+    access: AccessConfig | None = None
+    """Cloudflare Access verification (`[server.access]`); None when not configured."""
 
     @property
     def remote_enabled(self) -> bool:
-        """Whether remote access is configured: a `token_file` or any `tokens`."""
-        return self.token_file is not None or bool(self.tokens)
+        """Whether remote access is configured: a `token_file`, any `tokens`, or `access`."""
+        return self.token_file is not None or bool(self.tokens) or self.access is not None
 
 
 @dataclass(frozen=True)
@@ -235,29 +262,126 @@ def _parse_tokens(value: Any) -> tuple[TokenConfig, ...]:
         for key in ("file", "scope"):
             if key not in table:
                 raise ConfigError(f"`{where}.{key}` is missing")
-        scope = table["scope"]
-        if scope not in get_args(AccessScope):
-            raise ConfigError(f"`{where}.scope` must be one of {', '.join(get_args(AccessScope))}")
-        machine: str | None = None
-        if scope == "push":
-            if "machine" not in table:
-                raise ConfigError(f"`{where}.machine` is missing: a push token is for one machine")
-            machine = check_machine_name(table["machine"], f"{where}.machine")
-        elif "machine" in table:
-            raise ConfigError(f"`{where}.machine` is only for scope push")
+        scope, machine = _scope_and_machine(table, where)
         tokens.append(
             TokenConfig(
                 file=_token_path(table["file"], f"{where}.file"),
-                scope=cast(AccessScope, scope),
+                scope=scope,
                 machine=machine,
             )
         )
     return tuple(tokens)
 
 
+def _scope_and_machine(table: dict[str, Any], where: str) -> tuple[AccessScope, str | None]:
+    """A credential entry's `scope` (present) and `machine` (required for `push`, forbidden
+    otherwise)."""
+    scope = table["scope"]
+    if scope not in get_args(AccessScope):
+        raise ConfigError(f"`{where}.scope` must be one of {', '.join(get_args(AccessScope))}")
+    machine: str | None = None
+    if scope == "push":
+        if "machine" not in table:
+            raise ConfigError(f"`{where}.machine` is missing: a push token is for one machine")
+        machine = check_machine_name(table["machine"], f"{where}.machine")
+    elif "machine" in table:
+        raise ConfigError(f"`{where}.machine` is only for scope push")
+    return cast(AccessScope, scope), machine
+
+
+ACCESS_DOMAIN = ".cloudflareaccess.com"
+
+
+def _team_domain(value: Any) -> str:
+    """`server.access.team_domain`, lowercased: a host name `<team>.cloudflareaccess.com`."""
+    host = value.strip().lower() if isinstance(value, str) else ""
+    if (
+        len(host) <= 253
+        and _HOST_NAME.fullmatch(host)
+        and host.endswith(ACCESS_DOMAIN)
+        and len(host) > len(ACCESS_DOMAIN)
+    ):
+        return host
+    raise ConfigError(
+        "`server.access.team_domain` must be your team's host name, "
+        f"<team>{ACCESS_DOMAIN} (no scheme or path), not {value!r}"
+    )
+
+
+def _audiences(value: Any) -> tuple[str, ...]:
+    """`server.access.aud`: one audience tag or a non-empty list of them."""
+    tags = [value] if isinstance(value, str) else value
+    if (
+        not isinstance(tags, list)
+        or not tags
+        or not all(isinstance(tag, str) and tag.strip() for tag in tags)
+    ):
+        raise ConfigError(
+            "`server.access.aud` must be the application's audience tag, or a list of them"
+        )
+    return tuple(tag.strip() for tag in cast(list[str], tags))
+
+
+def _single_word(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value.isprintable()
+        and not any(char.isspace() for char in value)
+    )
+
+
+def _access_emails(value: Any) -> frozenset[str]:
+    names = _string_list(value, "server.access.emails")
+    emails = [name.strip().lower() for name in names]
+    for email in emails:
+        if not _single_word(email) or len(email) > 254:
+            raise ConfigError(f"`server.access.emails`: not an email address: {email!r}")
+    return frozenset(emails)
+
+
+def _parse_service_tokens(value: Any) -> tuple[ServiceTokenConfig, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ConfigError(
+            "`server.access.service_tokens` must be an array of tables "
+            "([[server.access.service_tokens]])"
+        )
+    tokens: list[ServiceTokenConfig] = []
+    for number, table in enumerate(cast(list[dict[str, Any]], value), start=1):
+        where = f"server.access.service_tokens[{number}]"
+        _check_keys(table, {"client_id", "scope", "machine"}, where)
+        for key in ("client_id", "scope"):
+            if key not in table:
+                raise ConfigError(f"`{where}.{key}` is missing")
+        client_id = table["client_id"]
+        if not _single_word(client_id) or len(client_id) > 255:
+            raise ConfigError(f"`{where}.client_id` must be the service token's client ID")
+        if any(token.client_id == client_id for token in tokens):
+            raise ConfigError(f"`{where}.client_id`: {client_id!r} is listed twice")
+        scope, machine = _scope_and_machine(table, where)
+        tokens.append(ServiceTokenConfig(client_id=client_id, scope=scope, machine=machine))
+    return tuple(tokens)
+
+
+def _parse_access(value: Any) -> AccessConfig:
+    if not isinstance(value, dict):
+        raise ConfigError("`server.access` must be a table ([server.access])")
+    table = cast(dict[str, Any], value)
+    _check_keys(table, {"team_domain", "aud", "emails", "service_tokens"}, "server.access")
+    for key in ("team_domain", "aud"):
+        if key not in table:
+            raise ConfigError(f"`server.access.{key}` is missing")
+    return AccessConfig(
+        team_domain=_team_domain(table["team_domain"]),
+        aud=_audiences(table["aud"]),
+        emails=_access_emails(table.get("emails", [])),
+        service_tokens=_parse_service_tokens(table.get("service_tokens", [])),
+    )
+
+
 def _parse_server(raw: dict[str, Any]) -> ServerConfig:
     table = _table(raw, "server")
-    _check_keys(table, {"bind", "token_file", "allowed_hosts", "tokens"}, "server")
+    _check_keys(table, {"bind", "token_file", "allowed_hosts", "tokens", "access"}, "server")
     defaults = ServerConfig()
     bind = defaults.bind
     if "bind" in table:
@@ -278,8 +402,11 @@ def _parse_server(raw: dict[str, Any]) -> ServerConfig:
     if "allowed_hosts" in table:
         names = _string_list(table["allowed_hosts"], "server.allowed_hosts")
         allowed_hosts = tuple(_allowed_host(name) for name in names)
+    access = defaults.access
+    if "access" in table:
+        access = _parse_access(table["access"])
     server = ServerConfig(
-        bind=bind, token_file=token_file, allowed_hosts=allowed_hosts, tokens=tokens
+        bind=bind, token_file=token_file, allowed_hosts=allowed_hosts, tokens=tokens, access=access
     )
     if allowed_hosts and not server.remote_enabled:
         raise ConfigError(
@@ -401,8 +528,10 @@ def load_config(path: Path | None = None) -> Config:
     Raises ConfigError on unreadable or malformed TOML, unknown keys, wrong types, a default
     flag or review model outside the allow-list, a review budget out of range, a `server` value
     that is not an address, path or host name, a `[[server.tokens]]` entry without a valid file,
-    scope and (for `push` only) machine, or a `peers` entry without a valid name, URL and token
-    file path.
+    scope and (for `push` only) machine, a `[server.access]` without a `<team>.cloudflareaccess.com`
+    team domain and audience tags (or with a service token like a bad `[[server.tokens]]` entry,
+    or a client ID listed twice), or a `peers` entry without a valid name, URL and token file
+    path.
     """
     path = path if path is not None else config_path()
     try:

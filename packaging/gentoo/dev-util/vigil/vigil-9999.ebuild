@@ -25,6 +25,8 @@ RDEPEND="
 	dev-python/python-multipart[${PYTHON_USEDEP}]
 	dev-python/httpx[${PYTHON_USEDEP}]
 	dev-python/tomlkit[${PYTHON_USEDEP}]
+	dev-python/pyjwt[${PYTHON_USEDEP}]
+	dev-python/cryptography[${PYTHON_USEDEP}]
 "
 # The tests need nothing beyond pytest (added by distutils_enable_tests) and
 # httpx, which is already a run-time dependency, so there is no test? BDEPEND.
