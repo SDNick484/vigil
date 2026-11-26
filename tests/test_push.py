@@ -439,3 +439,179 @@ def test_hub_restart_with_older_snapshot_recovers(
     pusher.step()
     assert pusher.status().last_error is None
     assert "newer" in {row.title for row in hub_store(fresh).sessions()}
+
+
+# The push loop (vigil hub, Task 19).
+import asyncio  # noqa: E402
+import logging  # noqa: E402
+from collections.abc import Awaitable, Callable  # noqa: E402
+
+import vigil.push  # noqa: E402
+from vigil.index.db import connect  # noqa: E402
+from vigil.push import run_push_loop  # noqa: E402
+
+LIVE_INTERVAL = 900
+
+
+class FakeWall:
+    """A wall clock that moves only when told to."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 11, 17, 15, 9, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+@pytest.fixture
+def quick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Push and heartbeat intervals of milliseconds, so the loop's waits (real time) are short."""
+    monkeypatch.setattr(vigil.push, "PUSH_MIN_INTERVAL", 0.001)
+    monkeypatch.setattr(vigil.push, "HEARTBEAT_EVERY", 0.02)
+    monkeypatch.setattr(vigil.push, "BACKOFF_START", 0.005)
+    monkeypatch.setattr(vigil.push, "BACKOFF_MAX", 0.02)
+
+
+async def until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Wait, a few milliseconds at a time, until `condition()` holds; fail after `timeout`."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "timed out waiting"
+        await asyncio.sleep(0.002)
+
+
+def puts(hub: FakeHub) -> list[dict[str, Any]]:
+    return [json.loads(request.content) for request in hub.requests if request.method == "PUT"]
+
+
+def builder(index: Path, live: LiveStatus) -> Callable[[], dict[str, Any]]:
+    def build() -> dict[str, Any]:
+        conn = connect(index)  # in the loop's thread: a connection belongs to its thread
+        try:
+            return build_snapshot(conn, LAPTOP, live, JUST_AFTER)
+        finally:
+            conn.close()
+
+    return build
+
+
+def run_loop(
+    body: Callable[[asyncio.Event, asyncio.Task[None]], Awaitable[None]],
+    pusher: HubPusher,
+    build: Callable[[], dict[str, Any]],
+    live: LiveStatus,
+    wall: FakeWall,
+) -> None:
+    async def main() -> None:
+        changed = asyncio.Event()
+        task = asyncio.create_task(
+            run_push_loop(pusher, build, live, LIVE_INTERVAL, changed, wall=wall)
+        )
+        try:
+            await body(changed, task)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(main())
+
+
+def by_id(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {session["id"]: session for session in snapshot["sessions"]}
+
+
+def test_loop_pushes_after_scan_and_probe(
+    index_db: sqlite3.Connection, fake_bin: FakeBin, tmp_path: Path, quick: None
+) -> None:
+    agents = install_agents_claude(fake_bin, [])
+    wall = FakeWall()
+    live = LiveStatus(wall=wall)
+    hub = FakeHub()
+    pusher = HubPusher(bearer(tmp_path), "laptop", transport=hub)
+    index = tmp_path / "data" / "index.db"
+
+    async def body(changed: asyncio.Event, task: asyncio.Task[None]) -> None:
+        # At start: one probe, then the snapshot.
+        await until(lambda: len(puts(hub)) == 1)
+        assert by_id(puts(hub)[0])[NEWEST]["status"] == "idle"
+        probes = len([call for call in fake_bin.calls("claude") if "agents" in call.argv])
+        assert probes == 1
+
+        # The index changes (a scan): the next snapshot has it.
+        set_meta(index_db, NEWEST, label="labelled")
+        changed.set()
+        await until(lambda: len(puts(hub)) == 2)
+        assert by_id(puts(hub)[1])[NEWEST]["label"] == "labelled"
+
+        # A session goes live; the loop probes `live_interval` after its last probe.
+        agents.write_text(json.dumps([{"sessionId": NEWEST, "kind": "background"}]))
+        sent = len(hub.requests)
+        await until(lambda: len(hub.requests) >= sent + 2)  # two heartbeats later,
+        assert len(puts(hub)) == 2  # not probed yet
+        wall.now += timedelta(seconds=LIVE_INTERVAL)
+        await until(lambda: len(puts(hub)) == 3)
+        assert by_id(puts(hub)[2])[NEWEST]["status"] == "background"
+        assert puts(hub)[2]["live_checked_at"] == to_db(wall.now)
+
+        # Nothing new: heartbeats only.
+        sent = len(hub.requests)
+        await until(lambda: len(hub.requests) >= sent + 3)
+        assert {request.method for request in hub.requests[sent:]} == {"POST"}
+        assert len(puts(hub)) == 3
+        assert not task.done()
+
+    run_loop(body, pusher, builder(index, live), live, wall)
+
+
+def test_loop_uses_a_page_probe(
+    index_db: sqlite3.Connection, fake_bin: FakeBin, tmp_path: Path, quick: None
+) -> None:
+    agents = install_agents_claude(fake_bin, [])
+    wall = FakeWall()
+    live = LiveStatus(wall=wall)
+    hub = FakeHub()
+    pusher = HubPusher(bearer(tmp_path), "laptop", transport=hub)
+
+    async def body(changed: asyncio.Event, task: asyncio.Task[None]) -> None:
+        await until(lambda: len(puts(hub)) == 1)
+        agents.write_text(json.dumps([{"sessionId": NEWEST, "kind": "interactive"}]))
+        wall.now += timedelta(seconds=10)
+        await asyncio.to_thread(live.get, fresh=True)  # as a page would
+        await until(lambda: len(puts(hub)) == 2)
+        assert by_id(puts(hub)[1])[NEWEST]["status"] == "running"
+
+    run_loop(body, pusher, builder(tmp_path / "data" / "index.db", live), live, wall)
+
+
+def test_loop_survives_build_error(
+    index_db: sqlite3.Connection,
+    fake_bin: FakeBin,
+    tmp_path: Path,
+    quick: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wall = FakeWall()
+    live = LiveStatus(wall=wall)
+    hub = FakeHub()
+    pusher = HubPusher(bearer(tmp_path), "laptop", transport=hub)
+    build = builder(tmp_path / "data" / "index.db", live)
+    calls = [0]
+
+    def flaky() -> dict[str, Any]:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("index unreadable")
+        return build()
+
+    async def body(changed: asyncio.Event, task: asyncio.Task[None]) -> None:
+        await until(lambda: calls[0] >= 1)
+        changed.set()
+        await until(lambda: len(puts(hub)) == 1)
+        assert not task.done()
+
+    with caplog.at_level(logging.ERROR, logger="vigil.push"):
+        run_loop(body, pusher, flaky, live, wall)
+    assert "building the snapshot failed" in caplog.text
+    assert "index unreadable" in caplog.text

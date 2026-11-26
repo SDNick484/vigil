@@ -12,13 +12,20 @@ digest of the sessions last accepted) every `HEARTBEAT_EVERY` seconds, and the w
 once when the hub answers 409 (it restarted with no or older data). A failure backs off from
 `BACKOFF_START` seconds, doubling up to `BACKOFF_MAX`.
 
+`run_push_loop` drives both inside `vigil serve`: it builds a snapshot after every index change
+(the watcher's scan), after every probe of the live sessions (its own, every `hub.live_interval`
+seconds, or one a page made), and lets the pusher send it. Nothing it does can stop or slow
+serving: it runs off the event loop and logs its errors.
+
 The credential (`[hub]`: an Access service token, else a bearer token) is read from its file for
 each request and sent to `hub.url` only, as the peers' tokens are (`vigil.peers`): every request
 is checked against that origin before it is sent, redirects are never followed, and proxy settings
 and `.netrc` are ignored. It is never logged or put in `last_error`.
 """
 
+import asyncio
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -40,6 +47,8 @@ from vigil.serialize import apply_status, session_to_dict
 
 if TYPE_CHECKING:  # vigil.web imports this module
     from vigil.web import LiveStatus
+
+_log = logging.getLogger(__name__)
 
 SNAPSHOT_DAYS = 30
 """A snapshot holds the sessions active in this many days before it was built."""
@@ -332,3 +341,67 @@ def _scrub(message: str, credentials: Mapping[str, str]) -> str:
             if secret:
                 message = message.replace(secret, "***")
     return message
+
+
+def _last(*times: datetime | None) -> datetime | None:
+    known = [at for at in times if at is not None]
+    return max(known) if known else None
+
+
+async def run_push_loop(
+    pusher: HubPusher,
+    build: Callable[[], dict[str, Any]],
+    live: LiveStatus,
+    live_interval: int,
+    changed: asyncio.Event,
+    *,
+    wall: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> None:
+    """Push this machine's snapshots until cancelled.
+
+    It waits for the earliest of: `changed` being set (the index changed), what `pusher.step`
+    says is next, and the next probe of the live sessions, `live_interval` seconds after the
+    last one (`live.checked_at`, a page's probe included; `wall` tells the time on the same
+    clock as `live`). It probes with `live.get(fresh=True)`, builds the snapshot (`build`) after
+    a change, a probe or a page's probe, offers it to `pusher` and steps it. `build`, the probe
+    and `step` run in threads; their exceptions are logged and the loop goes on (a failed build
+    is tried again after `BACKOFF_START` seconds)."""
+    stale = True  # nothing was built yet
+    tried_probe_at: datetime | None = None
+    seen_checked_at: datetime | None = None
+    while True:
+        wait = HEARTBEAT_EVERY
+        last_probe = _last(live.checked_at, tried_probe_at)
+        if last_probe is None or (wall() - last_probe).total_seconds() >= live_interval:
+            tried_probe_at = wall()
+            try:
+                await asyncio.to_thread(live.get, fresh=True)
+            except Exception:
+                _log.exception("push: probing the live sessions failed")
+        if live.checked_at != seen_checked_at:
+            seen_checked_at = live.checked_at
+            stale = True
+        if stale:
+            try:
+                snapshot = await asyncio.to_thread(build)
+            except Exception:
+                _log.exception("push: building the snapshot failed; will try again")
+                wait = BACKOFF_START
+            else:
+                pusher.offer(snapshot)
+                stale = False
+        try:
+            wait = min(wait, await asyncio.to_thread(pusher.step))
+        except Exception:
+            _log.exception("push: sending to the hub failed")
+            wait = min(wait, BACKOFF_START)
+        last_probe = _last(live.checked_at, tried_probe_at)
+        if last_probe is not None:
+            wait = min(wait, live_interval - (wall() - last_probe).total_seconds())
+        try:
+            await asyncio.wait_for(changed.wait(), timeout=max(0.0, wait))
+        except TimeoutError:
+            pass
+        if changed.is_set():
+            changed.clear()
+            stale = True

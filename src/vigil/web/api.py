@@ -141,6 +141,16 @@ class UsageOut(BaseModel):
     catalog_available: bool
 
 
+class HubPushOut(BaseModel):
+    """How pushing to the hub in `[hub]` goes: `last_push_at` when it last accepted a snapshot
+    (null when it has not since the service started), `last_error` why the last request failed
+    (null when it worked)."""
+
+    url: str
+    last_push_at: str | None
+    last_error: str | None
+
+
 class HealthOut(BaseModel):
     status: Literal["ok"]
     mode: Literal["local", "hub"]
@@ -148,6 +158,7 @@ class HealthOut(BaseModel):
     claude_version: str | None
     indexed_sessions: int
     last_scan_at: str | None
+    hub: HubPushOut | None = None
 
 
 class ResumeOut(BaseModel):
@@ -405,6 +416,7 @@ def health(request: Request) -> dict[str, object]:
         "claude_version": caps.version,
         "indexed_sessions": count,
         "last_scan_at": to_db(web.last_scan_at),
+        "hub": _push_status(web),
     }
 
 
@@ -712,3 +724,15 @@ def meta(
         return _refusal(404, _no_session(session_id))
     (updated,) = _with_status(request, [updated])
     return session_to_dict(updated)
+
+
+def _push_status(web: WebState) -> dict[str, object] | None:
+    """`HubPushOut` for this machine's pushing to its hub; None without `[hub]`."""
+    if web.pusher is None:
+        return None
+    status = web.pusher.status()
+    return {
+        "url": status.url,
+        "last_push_at": to_db(status.last_push_at),
+        "last_error": status.last_error,
+    }

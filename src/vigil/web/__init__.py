@@ -30,6 +30,7 @@ from vigil.claude_cli import (
 from vigil.config import Config, load_config
 from vigil.hub import HubStore
 from vigil.peers import PeerHub
+from vigil.push import HubPusher
 from vigil.review.runner import ReviewSlot
 
 LIVE_TTL = 5.0
@@ -120,6 +121,8 @@ class WebState:
     """Taken while a session review runs: one at a time (`vigil.web.review`)."""
     hub: HubStore | None = None
     """The machines' snapshots; set only in hub mode (`mode = "hub"`)."""
+    pusher: HubPusher | None = None
+    """Sends this machine's sessions to the hub in `[hub]`; None without `[hub]`."""
 
     def reload_config(self) -> None:
         """Re-read the config file (`vigil.paths.config_path`, where `vigil serve` reads it) after
