@@ -213,3 +213,87 @@ def web_client(vigil_env: VigilEnv) -> Iterator[TestClient]:
     )
     with TestClient(app, base_url=LOOPBACK_URL, headers={"Origin": LOOPBACK_URL}) as client:
         yield client
+
+
+# Cloudflare Access (hub plan, Task 6).
+import threading  # noqa: E402
+import time  # noqa: E402
+from typing import Any  # noqa: E402
+
+import httpx  # noqa: E402
+import jwt  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+from jwt.algorithms import RSAAlgorithm  # noqa: E402
+
+ACCESS_TEAM = "example-team.cloudflareaccess.com"
+ACCESS_ISSUER = f"https://{ACCESS_TEAM}"
+CERTS_URL = f"https://{ACCESS_TEAM}/cdn-cgi/access/certs"
+ACCESS_AUD = "aud-placeholder"
+
+
+@dataclass(frozen=True)
+class AccessKeys:
+    """A signing key as Cloudflare Access holds it, and its public half as the certs endpoint
+    serves it (a JWK with `kid`)."""
+
+    private_key: rsa.RSAPrivateKey
+    kid: str
+    jwks: dict[str, Any]
+
+
+def generate_access_keys(kid: str = "kid-placeholder-1", key_size: int = 2048) -> AccessKeys:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    jwk = RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+    return AccessKeys(private_key, kid, {**jwk, "kid": kid, "alg": "RS256", "use": "sig"})
+
+
+@pytest.fixture
+def access_keys() -> AccessKeys:
+    """A fresh RSA 2048 Access signing key."""
+    return generate_access_keys()
+
+
+def make_assertion(keys: AccessKeys, **claims: Any) -> str:
+    """A `Cf-Access-Jwt-Assertion` signed with `keys` (RS256, `kid` in the header): a user's for
+    `author@example.com`, issued now and valid for 5 minutes, unless `claims` say otherwise; a
+    claim given as None is left out."""
+    now = int(time.time())
+    payload: dict[str, Any] = {
+        "iss": ACCESS_ISSUER,
+        "aud": [ACCESS_AUD],
+        "iat": now,
+        "exp": now + 300,
+        "email": "author@example.com",
+        **claims,
+    }
+    payload = {name: value for name, value in payload.items() if value is not None}
+    return jwt.encode(payload, keys.private_key, algorithm="RS256", headers={"kid": keys.kid})
+
+
+class CertsServer(httpx.MockTransport):
+    """The team's certs endpoint (`CERTS_URL`) serving `{"keys": [...]}` for `keys`. Counts
+    `fetches`; with `fail` it cannot be reached; with `block` each fetch waits (up to 10 s) for
+    the event to be set; with `redirect` it answers 302 to that URL. Every request it sees is in
+    `requests`."""
+
+    def __init__(self, *keys: AccessKeys) -> None:
+        self.jwks = [key.jwks for key in keys]
+        self.fetches = 0
+        self.fail = False
+        self.block: threading.Event | None = None
+        self.redirect: str | None = None
+        self.requests: list[httpx.Request] = []
+        super().__init__(self._answer)
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if str(request.url) != CERTS_URL:
+            return httpx.Response(404)
+        self.fetches += 1
+        if self.block is not None:
+            self.block.wait(10)
+        if self.fail:
+            raise httpx.ConnectError("certs endpoint unreachable", request=request)
+        if self.redirect is not None:
+            return httpx.Response(302, headers={"Location": self.redirect})
+        return httpx.Response(200, json={"keys": self.jwks})
